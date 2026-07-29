@@ -55,6 +55,7 @@ Override with `--config PATH` or the `XDG_CONFIG_HOME` env var.
       "repo": "agent-skills",
       "skills_dir": "skills",   // root of the skills tree; skills may be nested at any depth
       "ref": "a1b2c3d",         // branch, tag, or commit SHA
+      "description": "Engineering and workflow skills for AI agents",  // optional — shown in list_registries
       "auth": {
         "type": "github_token",
         "env_var": "GITHUB_TOKEN"  // env var name — NOT the token value
@@ -141,25 +142,35 @@ agent-skills/
 
 With `skills_dir: "skills"`, `list_skills` returns
 `["business/brainstorming", "engineering/testing/tdd-development"]`.
-Use the full slash-delimited path as the `skill` argument to `get_skill` and `get_skill_file`.
+Use the full slash-delimited path as the `skill` argument to `get_skill`.
 
 ## MCP Tools
 
 | Tool | Parameters | Returns |
 |---|---|---|
-| `list_registries` | — | JSON array: `[{name, type, ref?}]` |
+| `list_registries` | — | JSON array: `[{name, type, ref?, description?}]` |
 | `list_skills` | `registry` | JSON array: `["skill-a", "skill-b"]` |
-| `get_skill` | `registry`, `skill` | JSON object: `{content: "…SKILL.md text…", files: ["references/guide.md"]}` |
-| `get_skill_file` | `registry`, `skill`, `file_path` | Raw text of the companion file |
+| `get_skill` | `registry`, `skill`, `file?` | Without `file`: JSON `{content, files}`; with `file`: raw companion file text |
 
-`get_skill_file` is only supported for GitHub registries. `file_path` must be a path relative to the skill root (as listed in `get_skill`'s `files` array); path traversal attempts are rejected.
+`file` is an optional parameter on `get_skill`. Pass a companion file path from the `files` array (e.g. `"references/guide.md"`) to fetch that file directly. Percent-encoded slashes are decoded automatically (e.g. `"references%2Fguide.md"`). Companion file access is only supported for GitHub registries; path traversal attempts are rejected.
+
+## MCP Resource Template
+
+Skills and their companion files are also accessible as MCP resources via URI — useful for hosts that support `read_resource` directly:
+
+```
+skill://{registry}/{skill_path}                        → SKILL.md raw text
+skill://{registry}/{skill_path}?file=references%2Fguide.md  → companion file raw text
+```
+
+Discover the template with `list_resource_templates`. `list_resources` returns empty (no static registrations).
 
 ### Error handling
 
 Each tool uses a consistent error format for its response type:
 
 - **Model-recoverable errors** (skill not found, unknown registry, unsupported operation, path traversal) — FastMCP marks the result `is_error=True`; the agent reads the message and may retry with corrected arguments.
-- **Infrastructure failures** (registry unreachable, auth failure, rate-limited) — caught at the tool boundary and returned as a per-tool error value (`{"error": "…"}` JSON for `list_skills`/`get_skill`; plain `"Error: …"` string for `get_skill_file`). The server and other registries continue serving normally — one registry failure does not cascade.
+- **Infrastructure failures** (registry unreachable, auth failure, rate-limited) — caught at the tool boundary and returned as a per-tool error value (`{"error": "…"}` JSON for `list_skills`; `{"error": "…"}` JSON or plain `"Error: …"` string for `get_skill` depending on whether `file` was provided). The server and other registries continue serving normally — one registry failure does not cascade.
 
 ## Caching
 
@@ -204,7 +215,7 @@ Add to your `opencode.jsonc` (or `~/.config/opencode/opencode.jsonc` for global 
 }
 ```
 
-Tools are exposed as `skills_mcp_list_registries`, `skills_mcp_list_skills`, `skills_mcp_get_skill`, and `skills_mcp_get_skill_file` in opencode's permission system.
+Tools are exposed as `skills_mcp_list_registries`, `skills_mcp_list_skills`, and `skills_mcp_get_skill` in opencode's permission system.
 
 ### Claude Desktop
 
@@ -241,7 +252,7 @@ Pass `--config /path/to/config.jsonc` as an additional arg to override the defau
 
 ```bash
 uv sync
-uv run pytest tests/ -q          # 77 tests
+uv run pytest tests/ -q          # 107 tests
 uv run ruff check src/ tests/
 uv run mypy src/
 ```

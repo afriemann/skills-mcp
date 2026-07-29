@@ -215,6 +215,8 @@ def _parse_github_registry(name: str, raw: dict[str, Any]) -> GithubRegistry:
         skills_dir = ""
     auth = _parse_github_auth(raw.get("auth"), name)
     cache_enabled = bool(raw.get("cache_enabled", True))
+    raw_desc = raw.get("description")
+    description = str(raw_desc) if isinstance(raw_desc, str) and raw_desc else None
     return GithubRegistry(
         name=name,
         owner=str(raw["owner"]),
@@ -223,6 +225,7 @@ def _parse_github_registry(name: str, raw: dict[str, Any]) -> GithubRegistry:
         ref=str(raw["ref"]),
         auth=auth,
         cache_enabled=cache_enabled,
+        description=description,
     )
 
 
@@ -232,12 +235,15 @@ def _parse_http_registry(name: str, raw: dict[str, Any]) -> HttpRegistry:
             _fatal(f"registry '{name}': missing required field '{required}'")
     auth = _parse_http_auth(raw.get("auth"), name)
     cache_enabled = bool(raw.get("cache_enabled", True))
+    raw_desc = raw.get("description")
+    description = str(raw_desc) if isinstance(raw_desc, str) and raw_desc else None
     return HttpRegistry(
         name=name,
         url=str(raw["url"]),
         skill_name=str(raw["skill_name"]),
         auth=auth,
         cache_enabled=cache_enabled,
+        description=description,
     )
 
 
