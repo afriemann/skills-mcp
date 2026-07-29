@@ -2,7 +2,7 @@
 
 ## Purpose
 
-MCP server for fetching opencode skills from configurable registries. Agents use its tools
+MCP server for fetching agent skills from configurable registries. Agents use its tools
 to discover and read skill content (SKILL.md and companion files) from remote sources
 without installing skills locally. Supports GitHub repositories (public and private,
 multi-skill, ref-locked) and direct HTTP URLs.
