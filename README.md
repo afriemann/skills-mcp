@@ -16,7 +16,7 @@ An MCP server that lets AI agents browse and fetch skills from remote registries
 Requires Python ≥ 3.11 and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-git clone https://github.com/yourorg/skills-mcp ~/git/skills-mcp
+git clone https://github.com/afriemann/skills-mcp ~/git/skills-mcp
 cd ~/git/skills-mcp
 uv sync
 ```
@@ -159,6 +159,11 @@ Set `cache_enabled: false` on a registry to disable caching for that registry. S
 
 ## Integration with opencode
 
+
+`skills-mcp` is a standard stdio MCP server and can be wired up in any MCP-compatible host.
+
+### opencode
+
 Add to your `opencode.jsonc` (or `~/.config/opencode/opencode.jsonc` for global access):
 
 ```jsonc
@@ -177,13 +182,51 @@ Add to your `opencode.jsonc` (or `~/.config/opencode/opencode.jsonc` for global 
 
 Tools are exposed as `skills_mcp_list_registries`, `skills_mcp_list_skills`, `skills_mcp_get_skill`, and `skills_mcp_get_skill_file` in opencode's permission system.
 
+### Claude Desktop
+
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
+
+```json
+{
+  "mcpServers": {
+    "skills-mcp": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--project", "/home/you/git/skills-mcp",
+        "skills-mcp"
+      ]
+    }
+  }
+}
+```
+
+### Generic stdio MCP host
+
+Any host that launches an MCP server as a child process:
+
+```
+command: uv
+args: ["run", "--project", "/path/to/skills-mcp", "skills-mcp"]
+```
+
+Pass `--config /path/to/config.jsonc` as an additional arg to override the default config path.
+
 ## Development
+
 
 ```bash
 uv sync
-uv run pytest tests/ -q          # 68 tests
+uv run pytest tests/ -q          # 77 tests
 uv run ruff check src/ tests/
 uv run mypy src/
+```
+
+Pre-commit hooks enforce lint, format, and type checks on every commit:
+
+```bash
+pre-commit install --install-hooks   # once, after cloning
+pre-commit run --all-files           # check everything now
 ```
 
 ## Non-goals (v1)

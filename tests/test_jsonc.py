@@ -1,6 +1,5 @@
 """Tests for the JSONC comment stripper."""
 
-
 from skills_mcp.config.loader import strip_jsonc
 
 
