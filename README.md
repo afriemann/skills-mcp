@@ -4,7 +4,7 @@ An MCP server that lets AI agents browse and fetch skills from remote registries
 
 ## Features
 
-- **GitHub registry** — multi-skill repos where each subdirectory is a skill; ref-locked to a branch, tag, or SHA; supports public and private repos
+- **GitHub registry** — multi-skill repos where each subdirectory (at any nesting depth) is a skill; ref-locked to a branch, tag, or SHA; supports public and private repos
 - **HTTP registry** — a single direct URL pointing at a `SKILL.md` file
 - **Read-through disk cache** — immutable SHA refs cache forever; branch/tag refs use a configurable TTL (default 1 hour)
 - **Flexible authentication** — GitHub Personal Access Token (env-var), `gh` CLI token (cached in-process), HTTP Bearer or Basic auth
@@ -53,7 +53,7 @@ Override with `--config PATH` or the `XDG_CONFIG_HOME` env var.
       "type": "github",
       "owner": "myorg",
       "repo": "agent-skills",
-      "skills_dir": "skills",   // subdirectory that contains one subdir per skill
+      "skills_dir": "skills",   // root of the skills tree; skills may be nested at any depth
       "ref": "a1b2c3d",         // branch, tag, or commit SHA
       "auth": {
         "type": "github_token",
@@ -106,7 +106,11 @@ Override with `--config PATH` or the `XDG_CONFIG_HOME` env var.
 
 ### GitHub repository layout
 
-A GitHub registry expects the repo to contain one skill per subdirectory under `skills_dir`:
+Skills can be placed at any nesting depth under `skills_dir`. A directory is treated as a skill
+when it contains a `SKILL.md` file; directories without one (e.g. category folders) are skipped.
+Skill names returned by `list_skills` are slash-delimited paths relative to `skills_dir`.
+
+**Flat layout** (one level deep):
 
 ```
 agent-skills/
@@ -119,7 +123,25 @@ agent-skills/
         └── SKILL.md
 ```
 
-With `skills_dir: "skills"` in the config above, `list_skills` returns `["my-skill", "another-skill"]`.
+With `skills_dir: "skills"`, `list_skills` returns `["another-skill", "my-skill"]`.
+
+**Nested layout** (multiple levels):
+
+```
+agent-skills/
+└── skills/
+    ├── engineering/
+    │   └── testing/
+    │       └── tdd-development/
+    │           └── SKILL.md
+    └── business/
+        └── brainstorming/
+            └── SKILL.md
+```
+
+With `skills_dir: "skills"`, `list_skills` returns
+`["business/brainstorming", "engineering/testing/tdd-development"]`.
+Use the full slash-delimited path as the `skill` argument to `get_skill` and `get_skill_file`.
 
 ## MCP Tools
 
@@ -170,12 +192,14 @@ Add to your `opencode.jsonc` (or `~/.config/opencode/opencode.jsonc` for global 
 "mcp": {
   "skills-mcp": {
     "type": "local",
-    "command": "uv",
-    "args": [
+    "command": [
+      "uv",
       "run",
-      "--project", "{env:HOME}/git/skills-mcp",
+      "--project",
+      "{env:HOME}/git/skills-mcp",
       "skills-mcp"
-    ]
+    ],
+    "enabled": true
   }
 }
 ```

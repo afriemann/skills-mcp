@@ -39,6 +39,25 @@ def _skill_tree() -> dict[str, Any]:
 class IntegrationTransport(httpx.AsyncBaseTransport):
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         url = str(request.url).split("?")[0]
+        # list_skills: resolve skills_dir tree SHA from root listing
+        if url == f"{_gh_base()}/contents/":
+            return httpx.Response(
+                200,
+                json=[{"name": "skills", "type": "dir", "sha": "tree-sha-skills-dir"}],
+            )
+        # list_skills: recursive tree of skills/
+        if url == f"{_gh_base()}/git/trees/tree-sha-skills-dir":
+            return httpx.Response(
+                200,
+                json={
+                    "truncated": False,
+                    "tree": [
+                        {"path": "coding/SKILL.md", "type": "blob", "sha": "blob-coding-skill-md"},
+                        {"path": "git/SKILL.md", "type": "blob", "sha": "blob-git-skill-md"},
+                    ],
+                },
+            )
+        # fetch_skill/fetch_file: resolve individual skill tree SHAs from skills/ listing
         if url == f"{_gh_base()}/contents/skills":
             return httpx.Response(200, json=_skills_dir())
         if url == f"{_gh_base()}/git/trees/tree-sha-coding":
