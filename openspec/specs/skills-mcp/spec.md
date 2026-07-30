@@ -47,59 +47,73 @@ in config). The operation requires no I/O and SHALL never fail with an error.
 - **THEN** the result object for that registry contains no `description` key
 
 ### Requirement: List Skills Tool
-`list_skills(registry: str)` SHALL return a list of skill identifier strings available in
-the named registry. For GitHub registries it discovers skills at any nesting depth within
-`skills_dir` by performing a recursive Git Trees walk; each skill is identified by its
-slash-delimited path relative to `skills_dir` (e.g. `engineering/testing/tdd-development`
-for a skill at `skills_dir/engineering/testing/tdd-development/SKILL.md`). A directory is
-a skill if and only if it contains a `SKILL.md` file; subdirectories that contain no
-`SKILL.md` are not returned. Skills whose `SKILL.md` sits directly at the root of
-`skills_dir` (rather than in a subdirectory) are excluded — skill names are always
-non-empty subdirectory paths. When one skill's directory is an ancestor of another skill's
-directory (i.e. a `SKILL.md` is bundled inside a companion-file subtree), only the
-shallowest skill is returned; the deeper path is treated as a companion file, not a skill.
-For HTTP registries it returns a single-element list containing the declared `skill_name`.
-Names only are returned — no descriptions, no metadata — to avoid N+1 upstream API calls.
+`list_skills(registry: str, refresh_cache: bool = False)` SHALL return a JSON array of
+objects, one per skill available in the named registry. Each object SHALL contain at minimum
+`name` (the skill identifier string — the value an agent passes to `get_skill`). When the
+skill's SKILL.md contains a parseable frontmatter block, the object SHALL also contain any
+top-level scalar or string-list fields found there (e.g. `description`, `tags`); the `name`
+key in the result is always the skill identifier, not the frontmatter `name:` field.
+A skill whose SKILL.md cannot be fetched at index-build time SHALL still appear in the
+result as a name-only object (`{"name": "<identifier>"}`), preserving discoverability.
 
-#### Scenario: Lists GitHub registry skills (flat layout)
-- **WHEN** `list_skills` is called for a GitHub registry whose `skills_dir` contains two direct
-  skill subdirectories `skill-a` and `skill-b`, each with a `SKILL.md`
-- **THEN** the result is `["skill-a", "skill-b"]`
+The N+1 upstream-call cost is avoided by the cached skill index (see Skill Index
+capability): only skills absent from the index incur a fetch; warm-index calls perform no
+upstream I/O beyond the names-list cache read. The discovery rules for skill identifiers are
+unchanged: GitHub registries walk the recursive tree of `skills_dir`; HTTP registries return
+a single-element list containing the declared `skill_name`; pruning and nesting rules are
+unchanged.
 
-#### Scenario: Lists GitHub registry skills (nested layout)
-- **WHEN** `list_skills` is called for a GitHub registry whose `skills_dir` contains skills
-  at `engineering/testing/tdd-development/SKILL.md` and `business/brainstorming/SKILL.md`
-- **THEN** the result is `["business/brainstorming", "engineering/testing/tdd-development"]`
+When `refresh_cache` is `True` the names-list cache and the skill index are both bypassed:
+skills are re-discovered upstream and all SKILL.md blobs are re-fetched, rebuilding the
+index from scratch. The refreshed names list and index SHALL be written back to cache.
 
-#### Scenario: Non-skill subdirectories are excluded
-- **WHEN** `list_skills` is called for a GitHub registry whose `skills_dir` contains a
-  subdirectory that has no `SKILL.md` (only other files)
-- **THEN** that subdirectory does not appear in the result
+Unknown registry SHALL raise an error (`is_error=True`). Registry-unreachable SHALL return
+an error string result (per the existing error-classification requirement).
 
-#### Scenario: Bundled SKILL.md is not a phantom skill
-- **WHEN** a skill at `my-skill/SKILL.md` also ships `my-skill/references/example/SKILL.md`
-  as a companion file
-- **THEN** `list_skills` returns only `["my-skill"]` — the deeper path is not a separate skill
+#### Scenario: Returns object list with frontmatter fields
+- **WHEN** `list_skills` is called for a registry whose skills have frontmatter `description` and `tags`
+- **THEN** the result is a JSON array of objects each containing `name`, `description`, and `tags`
 
-#### Scenario: Lists HTTP registry skill
-- **WHEN** `list_skills` is called for an HTTP registry declared with `skill_name = "my-skill"`
-- **THEN** the result is `["my-skill"]`
+#### Scenario: Returns name-only object when SKILL.md cannot be fetched
+- **WHEN** `list_skills` is called and one skill's SKILL.md is temporarily unreachable
+- **THEN** the result still includes that skill as `{"name": "<identifier>"}` and the other skills appear normally
+
+#### Scenario: Returns object list for HTTP registry
+- **WHEN** `list_skills` is called for an HTTP registry
+- **THEN** the result is a single-element array containing an object with at least `name`
+
+#### Scenario: refresh_cache rebuilds the index from scratch
+- **WHEN** `list_skills` is called with `refresh_cache=True`
+- **THEN** the names list and all SKILL.md blobs are re-fetched upstream and the skill index is fully rebuilt
+
+#### Scenario: Warm-index call incurs no upstream blob fetch
+- **WHEN** `list_skills` is called a second time for the same registry (index already populated)
+- **THEN** no SKILL.md blob fetch is made upstream; the cached index is returned
+
+#### Scenario: Skill identifier is always authoritative for name
+- **WHEN** a SKILL.md's frontmatter `name:` field differs from its directory-path identifier
+- **THEN** the `name` key in the result object is the directory-path identifier, not the frontmatter value
 
 #### Scenario: Unknown registry raises error
 - **WHEN** `list_skills` is called with a registry name that does not exist in the config
-- **THEN** the tool returns an `is_error=True` result (a `ValueError` is raised)
+- **THEN** the tool returns an `is_error=True` result
 
 ### Requirement: Get Skill Tool
-`get_skill(registry: str, skill: str, file: str | None = None)` SHALL behave as follows:
+`get_skill` SHALL accept `registry`, `skill`, optional `file`, and optional
+`refresh_cache: bool = False` and behave as follows:
 — When `file` is absent (default): return a JSON object with `content` (the full SKILL.md
 text) and `files` (a sorted list of companion file paths relative to the skill root,
 excluding `SKILL.md` itself). For HTTP registries `files` SHALL be an empty list.
+When `refresh_cache` is `True` and `file` is absent, the SKILL.md SHALL be re-fetched
+from upstream, bypassing the per-skill cache entry; the fresh result SHALL be written back
+to the per-skill cache, replacing the stale entry.
 — When `file` is present: URL-decode the value (`urllib.parse.unquote`) and return the
 named companion file's raw text directly (not wrapped in a JSON envelope). This path
-SHALL route directly to `fetch_file` with no prior `fetch_skill` call. Security validation
-(path traversal check, membership in the skill's file tree) SHALL apply identically to
-the removed `get_skill_file` behaviour. For HTTP registries, calling with `file` present
-SHALL raise an `UnsupportedOperationError` (`ValueError`).
+SHALL route directly to `fetch_file` with no prior `fetch_skill` call. `refresh_cache`
+has no effect when `file` is present.
+Security validation (path traversal check, membership in the skill's file tree) SHALL apply
+identically. For HTTP registries, calling with `file` present SHALL raise an
+`UnsupportedOperationError` (`ValueError`).
 
 #### Scenario: Returns SKILL.md content and companion files from GitHub
 - **WHEN** `get_skill` is called without `file` for a GitHub registry skill that contains `SKILL.md` and a `references/guide.md` companion file
@@ -116,6 +130,14 @@ SHALL raise an `UnsupportedOperationError` (`ValueError`).
 #### Scenario: Percent-encoded slashes in file query param are decoded
 - **WHEN** `get_skill` is called with `file="references%2Fguide.md"` (percent-encoded slash)
 - **THEN** the handler decodes it to `references/guide.md` before dispatch and the correct file content is returned
+
+#### Scenario: refresh_cache bypasses cache and writes back
+- **WHEN** `get_skill` is called with `refresh_cache=True` and no `file`
+- **THEN** the SKILL.md is re-fetched upstream and the per-skill cache entry is replaced with the fresh content
+
+#### Scenario: refresh_cache ignored when file is present
+- **WHEN** `get_skill` is called with `refresh_cache=True` and `file="references/guide.md"`
+- **THEN** the companion file is fetched via the normal `fetch_file` path (no special refresh behaviour)
 
 #### Scenario: HTTP registry with file raises error
 - **WHEN** `get_skill` is called with `file` present for an HTTP registry
