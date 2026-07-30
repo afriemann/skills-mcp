@@ -17,9 +17,10 @@ from pathlib import Path, PurePosixPath
 
 logger = logging.getLogger(__name__)
 
-# Sentinel filenames used for list_skills and fetch_skill results
+# Sentinel filenames used for list_skills, fetch_skill, and the skill index
 _SKILLS_LIST_FILE = "__skills.json"
 _SKILL_CONTENT_FILE = "__skill.json"
+_SKILL_INDEX_FILE = "__skill_index.json"
 
 
 def _percent_encode(component: str) -> str:

@@ -125,13 +125,18 @@ def build_app(config_path: Path | None = None) -> FastMCP:
             "Skills are identified by their name — for GitHub registries: a slash-delimited "
             "path relative to skills_dir (e.g. 'engineering/testing/tdd-development'); "
             "for HTTP registries: the declared skill name. "
-            "Returns a JSON array of skill name strings — names only, no metadata. "
-            "Use get_skill(registry, skill) to fetch the actual content of a skill."
+            "Returns a JSON array of objects, one per skill, each with at least 'name' "
+            "and optionally 'description', 'tags', and other keys parsed from the skill's "
+            "SKILL.md frontmatter. "
+            "An incrementally-maintained DiskCache index is used so only new skills require "
+            "upstream fetches; a warm index incurs no blob-fetch traffic. "
+            "Set refresh_cache=true to bypass the index and re-fetch all skills from upstream. "
+            "Use get_skill(registry, skill) to fetch the full SKILL.md content of a skill."
         )
     )
-    async def list_skills(registry: str) -> str:
+    async def list_skills(registry: str, refresh_cache: bool = False) -> str:
         try:
-            result = await _disp().list_skills(registry)
+            result = await _disp().list_skills_metadata(registry, refresh=refresh_cache)
             return json.dumps(result)
         except RegistryUnavailableError as exc:
             return json.dumps({"error": f"Error: {exc}"})
@@ -155,18 +160,24 @@ def build_app(config_path: Path | None = None) -> FastMCP:
             "Percent-encoded slashes are decoded automatically "
             "(e.g. 'references%2Fguide.md' → 'references/guide.md'). "
             "\n\n"
+            "Set refresh_cache=true to bypass the per-skill disk cache and fetch fresh content "
+            "from the upstream registry; the repaired result is written back to cache. "
+            "refresh_cache is ignored when 'file' is provided. "
+            "\n\n"
             "URI-based access: skills and companion files are also readable via the "
             "skill://{registry}/{skill}[?file=...] resource template "
             "(discover it with list_resource_templates)."
         )
     )
-    async def get_skill(registry: str, skill: str, file: str | None = None) -> str:
+    async def get_skill(
+        registry: str, skill: str, file: str | None = None, refresh_cache: bool = False
+    ) -> str:
         try:
             if file is not None:
                 decoded_file = unquote(file)
                 raw = await _disp().get_skill(registry, skill, file=decoded_file)
                 return raw if isinstance(raw, str) else json.dumps(raw)
-            result = await _disp().get_skill(registry, skill)
+            result = await _disp().get_skill(registry, skill, refresh=refresh_cache)
             assert isinstance(result, SkillContent)
             return json.dumps(result.to_dict())
         except RegistryUnavailableError as exc:
