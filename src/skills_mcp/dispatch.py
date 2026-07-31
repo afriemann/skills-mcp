@@ -12,23 +12,8 @@ class Dispatcher:
     def __init__(
         self,
         adapters: dict[str, MetadataRegistry],
-        descriptions: dict[str, str | None] | None = None,
     ) -> None:
         self._adapters = adapters
-        self._descriptions: dict[str, str | None] = descriptions or {}
-
-    def list_registries(self) -> list[dict[str, object]]:
-        """Return metadata for all configured registries (pure, no I/O)."""
-        result: list[dict[str, object]] = []
-        for adapter in self._adapters.values():
-            entry: dict[str, object] = {"name": adapter.name, "type": adapter.type}
-            if adapter.ref is not None:
-                entry["ref"] = adapter.ref
-            desc = self._descriptions.get(adapter.name)
-            if desc is not None:
-                entry["description"] = desc
-            result.append(entry)
-        return result
 
     async def list_skills(self, registry: str) -> list[str]:
         return await self._get_adapter(registry).list_skills()

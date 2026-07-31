@@ -1,4 +1,4 @@
-"""Tests for the registry instructions field and _build_list_registries_description.
+"""Tests for the registry instructions field and _build_list_skills_description.
 
 # spec: openspec/changes/registry-instructions-field/specs/registry-instructions/spec.md
 """
@@ -14,7 +14,7 @@ from skills_mcp.config.model import (
     HttpRegistry,
     NoAuth,
 )
-from skills_mcp.server import _build_list_registries_description
+from skills_mcp.server import _build_list_skills_description
 
 
 def _write_config(tmp_path: Path, data: dict) -> Path:
@@ -173,11 +173,11 @@ def test_empty_string_instructions_treated_as_none(tmp_path: Path):
 # Scenario: Description with no registries configured
 # ---------------------------------------------------------------------------
 
-_STATIC_INTRO = "List all configured skill registries."
+_STATIC_INTRO = "List the skill names available in a named registry."
 
 
 def test_description_with_no_registries_configured():
-    result = _build_list_registries_description(_cfg())
+    result = _build_list_skills_description(_cfg())
     assert _STATIC_INTRO in result
     assert "Configured registries:" not in result
 
@@ -192,7 +192,7 @@ def test_description_with_registry_having_description_and_instructions():
         description="The acme skills registry",
         instructions="Call list_skills('my-reg') at session start",
     )
-    result = _build_list_registries_description(_cfg(reg))
+    result = _build_list_skills_description(_cfg(reg))
     assert "my-reg" in result
     assert "The acme skills registry" in result
     assert "Call list_skills('my-reg') at session start" in result
@@ -205,7 +205,7 @@ def test_description_with_registry_having_description_and_instructions():
 
 def test_description_with_registry_having_description_only():
     reg = _github_reg(description="The acme skills registry", instructions=None)
-    result = _build_list_registries_description(_cfg(reg))
+    result = _build_list_skills_description(_cfg(reg))
     assert "my-reg" in result
     assert "The acme skills registry" in result
     # instructions is None — no instructions line should follow
@@ -219,7 +219,7 @@ def test_description_with_registry_having_description_only():
 
 def test_description_with_registry_having_neither_description_nor_instructions():
     reg = _github_reg(description=None, instructions=None)
-    result = _build_list_registries_description(_cfg(reg))
+    result = _build_list_skills_description(_cfg(reg))
     assert "my-reg" in result
 
 
@@ -233,7 +233,7 @@ def test_description_with_instructions_only_no_description():
         description=None,
         instructions="Call list_skills('my-reg') at session start",
     )
-    result = _build_list_registries_description(_cfg(reg))
+    result = _build_list_skills_description(_cfg(reg))
     assert "my-reg" in result
     assert "Call list_skills('my-reg') at session start" in result
 
@@ -246,7 +246,7 @@ def test_description_with_instructions_only_no_description():
 def test_multiple_registries_appear_in_config_order():
     reg_a = _github_reg(name="alpha", instructions="Alpha instructions")
     reg_b = _http_reg(name="beta", instructions="Beta instructions")
-    result = _build_list_registries_description(_cfg(reg_a, reg_b))
+    result = _build_list_skills_description(_cfg(reg_a, reg_b))
     pos_alpha = result.index("alpha")
     pos_beta = result.index("beta")
     assert pos_alpha < pos_beta

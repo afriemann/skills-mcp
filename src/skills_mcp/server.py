@@ -32,19 +32,23 @@ _DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=5.0)
 # URI template advertised to clients for skill resource access.
 _SKILL_URI_TEMPLATE = "skill://{registry}/{+skill}{?file}"
 
-_LIST_REGISTRIES_INTRO = (
-    "List all configured skill registries. "
-    "Returns a JSON array of objects, one per registry, with: "
-    "'name' (registry identifier), "
-    "'type' ('github' or 'http'), "
-    "optionally 'ref' (branch/tag/SHA for GitHub registries), "
-    "and optionally 'description' (human-readable registry purpose, when configured). "
-    "Call this first to discover available registries before listing or fetching skills."
+_LIST_SKILLS_INTRO = (
+    "List the skill names available in a named registry. "
+    "Skills are identified by their name — for GitHub registries: a slash-delimited "
+    "path relative to skills_dir (e.g. 'engineering/testing/tdd-development'); "
+    "for HTTP registries: the declared skill name. "
+    "Returns a JSON array of objects, one per skill, each with at least 'name' "
+    "and optionally 'description', 'tags', and other keys parsed from the skill's "
+    "SKILL.md frontmatter. "
+    "An incrementally-maintained DiskCache index is used so only new skills require "
+    "upstream fetches; a warm index incurs no blob-fetch traffic. "
+    "Set refresh_cache=true to bypass the index and re-fetch all skills from upstream. "
+    "Use get_skill(registry, skill) to fetch the full SKILL.md content of a skill."
 )
 
 
-def _build_list_registries_description(cfg: Config) -> str:
-    """Assemble the list_registries tool description from loaded configuration.
+def _build_list_skills_description(cfg: Config) -> str:
+    """Assemble the list_skills tool description from loaded configuration.
 
     Starts with the static introductory text.  For each configured registry,
     appends an entry that always includes the registry name, includes the
@@ -53,9 +57,9 @@ def _build_list_registries_description(cfg: Config) -> str:
     call-to-action block.
     """
     if not cfg.registries:
-        return _LIST_REGISTRIES_INTRO
+        return _LIST_SKILLS_INTRO
 
-    parts = [_LIST_REGISTRIES_INTRO, "\n\nConfigured registries:"]
+    parts = [_LIST_SKILLS_INTRO, "\n\nConfigured registries:"]
     for name, reg in cfg.registries.items():
         entry = f"\n- {name}"
         if reg.description:
@@ -100,7 +104,7 @@ class _SkillResourceTemplate(ResourceTemplate):
 def build_app(config_path: Path | None = None) -> FastMCP:
     """Build and return the FastMCP application.
 
-    Loads config, wires adapters, and registers three tools and one resource template.
+    Loads config, wires adapters, and registers two tools and one resource template.
     Exits via sys.exit(1) on any config error (before the MCP handshake).
     """
     cfg = load_config(config_path)
@@ -116,8 +120,7 @@ def build_app(config_path: Path | None = None) -> FastMCP:
             follow_redirects=False,
         ) as client:
             adapters = build_adapters(cfg, client, auth_resolver)
-            descriptions = {name: reg.description for name, reg in cfg.registries.items()}
-            _dispatcher.append(Dispatcher(adapters, descriptions))
+            _dispatcher.append(Dispatcher(adapters))
             try:
                 yield
             finally:
@@ -134,32 +137,10 @@ def build_app(config_path: Path | None = None) -> FastMCP:
         return _dispatcher[0]
 
     # ------------------------------------------------------------------
-    # Tool: list_registries
-    # ------------------------------------------------------------------
-
-    @mcp.tool(description=_build_list_registries_description(cfg))
-    async def list_registries() -> str:
-        return json.dumps(_disp().list_registries())
-
-    # ------------------------------------------------------------------
     # Tool: list_skills
     # ------------------------------------------------------------------
 
-    @mcp.tool(
-        description=(
-            "List the skill names available in a named registry. "
-            "Skills are identified by their name — for GitHub registries: a slash-delimited "
-            "path relative to skills_dir (e.g. 'engineering/testing/tdd-development'); "
-            "for HTTP registries: the declared skill name. "
-            "Returns a JSON array of objects, one per skill, each with at least 'name' "
-            "and optionally 'description', 'tags', and other keys parsed from the skill's "
-            "SKILL.md frontmatter. "
-            "An incrementally-maintained DiskCache index is used so only new skills require "
-            "upstream fetches; a warm index incurs no blob-fetch traffic. "
-            "Set refresh_cache=true to bypass the index and re-fetch all skills from upstream. "
-            "Use get_skill(registry, skill) to fetch the full SKILL.md content of a skill."
-        )
-    )
+    @mcp.tool(description=_build_list_skills_description(cfg))
     async def list_skills(registry: str, refresh_cache: bool = False) -> str:
         try:
             result = await _disp().list_skills_metadata(registry, refresh=refresh_cache)

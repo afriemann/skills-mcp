@@ -2,6 +2,7 @@
 
 # spec: openspec/changes/skill-access-consolidation/specs/skills-mcp/spec.md
 # spec: openspec/changes/skill-listing-frontmatter-index/specs/skills-mcp/spec.md
+# spec: openspec/changes/remove-list-registries-tool/specs/skills-mcp/spec.md
 
 import json
 from pathlib import Path
@@ -162,32 +163,6 @@ def config_file_cached(tmp_path: Path) -> Path:
 
 
 @pytest.fixture()
-def config_file_with_description(tmp_path: Path) -> Path:
-    data = {
-        "registries": {
-            "gh-skills": {
-                "type": "github",
-                "owner": "acme",
-                "repo": "skills",
-                "skills_dir": "skills",
-                "ref": "main",
-                "description": "Clark engineering skills",
-            },
-            "my-http": {
-                "type": "http",
-                "url": "https://example.com/SKILL.md",
-                "skill_name": "http-skill",
-                # no description
-            },
-        },
-        "cache": {"enabled": False},
-    }
-    p = tmp_path / "skills-mcp.jsonc"
-    p.write_text(json.dumps(data))
-    return p
-
-
-@pytest.fixture()
 def mcp_app(config_file: Path, monkeypatch: pytest.MonkeyPatch):
     """Build the FastMCP app with a fake httpx transport active for the entire test."""
     original_cls = httpx.AsyncClient
@@ -200,20 +175,6 @@ def mcp_app(config_file: Path, monkeypatch: pytest.MonkeyPatch):
     # Keep the patch active for the whole test (monkeypatch auto-restores after the test)
     monkeypatch.setattr(httpx, "AsyncClient", PatchedClient)
     return build_app(config_file)
-
-
-@pytest.fixture()
-def mcp_app_with_description(config_file_with_description: Path, monkeypatch: pytest.MonkeyPatch):
-    """Build the FastMCP app configured with registry descriptions."""
-    original_cls = httpx.AsyncClient
-
-    class PatchedClient(original_cls):  # type: ignore[misc]
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            kwargs["transport"] = IntegrationTransport()
-            super().__init__(*args, **kwargs)
-
-    monkeypatch.setattr(httpx, "AsyncClient", PatchedClient)
-    return build_app(config_file_with_description)
 
 
 @pytest.fixture()
@@ -280,13 +241,13 @@ async def _read_resource(app, uri: str) -> tuple[str, bool]:
 
 
 # ---------------------------------------------------------------------------
-# Scenario: Tool list is stable (exactly three tools)
+# Scenario: Tool list is stable (exactly two tools)
 # ---------------------------------------------------------------------------
 
 
-async def test_tool_list_is_exactly_three(mcp_app):
-    """The server MUST advertise exactly three tools: list_registries, list_skills, get_skill."""
-    expected = {"list_registries", "list_skills", "get_skill"}
+async def test_tool_list_is_stable(mcp_app):
+    """The server MUST advertise exactly two tools: list_skills, get_skill."""
+    expected = {"list_skills", "get_skill"}
     async with create_connected_server_and_client_session(mcp_app) as session:
         tools = await session.list_tools()
     names = {t.name for t in tools.tools}
@@ -305,46 +266,6 @@ async def test_resource_template_is_advertised(mcp_app):
     uris = [t.uriTemplate for t in result.resourceTemplates]
     assert len(uris) == 1
     assert uris[0] == "skill://{registry}/{+skill}{?file}"
-
-
-# ---------------------------------------------------------------------------
-# list_registries tests
-# ---------------------------------------------------------------------------
-
-
-async def test_list_registries_returns_both(mcp_app):
-    text, is_error = await _call(mcp_app, "list_registries", {})
-    assert not is_error
-    data = json.loads(text)
-    names = {r["name"] for r in data}
-    assert names == {"gh-skills", "my-http"}
-
-
-async def test_list_registries_empty(tmp_path: Path):
-    p = tmp_path / "skills-mcp.jsonc"
-    p.write_text(json.dumps({"registries": {}}))
-    app = build_app(p)
-    text, is_error = await _call(app, "list_registries", {})
-    assert not is_error
-    assert json.loads(text) == []
-
-
-async def test_list_registries_returns_description(mcp_app_with_description):
-    """Scenario: Returns description when configured."""
-    text, is_error = await _call(mcp_app_with_description, "list_registries", {})
-    assert not is_error
-    data = json.loads(text)
-    gh = next(r for r in data if r["name"] == "gh-skills")
-    assert gh.get("description") == "Clark engineering skills"
-
-
-async def test_list_registries_omits_description_when_absent(mcp_app_with_description):
-    """Scenario: Description absent when not configured."""
-    text, is_error = await _call(mcp_app_with_description, "list_registries", {})
-    assert not is_error
-    data = json.loads(text)
-    http = next(r for r in data if r["name"] == "my-http")
-    assert "description" not in http
 
 
 # ---------------------------------------------------------------------------
