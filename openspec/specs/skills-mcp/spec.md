@@ -10,41 +10,18 @@ multi-skill, ref-locked) and direct HTTP URLs.
 *This is the initial stub spec. All requirements are introduced by change `skills-mcp-server`.*
 ## Requirements
 ### Requirement: MCP Tool Surface
-The server SHALL expose exactly three MCP tools — `list_registries`, `list_skills`, and
-`get_skill` — and one MCP resource template — `skill://{registry}/{+skill}{?file}` —
-over a stdio transport using FastMCP. Each tool SHALL carry an explicit `description=`
+The server SHALL expose exactly two MCP tools — `list_skills` and `get_skill` —
+and one MCP resource template — `skill://{registry}/{+skill}{?file}` — over a
+stdio transport using FastMCP. Each tool SHALL carry an explicit `description=`
 parameter (not a docstring) as its only contract with the calling model.
 
 #### Scenario: Tool list is stable
 - **WHEN** an MCP client connects to the server
-- **THEN** exactly three tools are advertised: `list_registries`, `list_skills`, `get_skill`
+- **THEN** exactly two tools are advertised: `list_skills`, `get_skill`
 
 #### Scenario: Resource template is advertised
 - **WHEN** an MCP client calls `list_resource_templates`
 - **THEN** exactly one template is returned with URI pattern `skill://{registry}/{+skill}{?file}`
-
-### Requirement: List Registries Tool
-`list_registries()` SHALL return a list of objects, one per configured registry, each
-containing `name` (string), `type` (`"github"` or `"http"`), optionally `ref`
-(the configured ref for GitHub registries; absent for HTTP), and optionally `description`
-(a human-readable string describing the registry's purpose; absent when not configured
-in config). The operation requires no I/O and SHALL never fail with an error.
-
-#### Scenario: Returns all configured registries
-- **WHEN** `list_registries` is called with two configured registries (one GitHub, one HTTP)
-- **THEN** both appear in the result with their name, type, and ref (GitHub) or no ref (HTTP)
-
-#### Scenario: Returns empty list when no registries configured
-- **WHEN** `list_registries` is called with an empty registry config
-- **THEN** the result is an empty list
-
-#### Scenario: Returns description when configured
-- **WHEN** a registry is configured with `description: "Clark engineering skills"`
-- **THEN** the `description` field appears in the `list_registries` result for that registry
-
-#### Scenario: Description absent when not configured
-- **WHEN** a registry is configured without a `description` field
-- **THEN** the result object for that registry contains no `description` key
 
 ### Requirement: List Skills Tool
 `list_skills(registry: str, refresh_cache: bool = False)` SHALL return a JSON array of
