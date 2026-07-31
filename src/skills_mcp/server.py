@@ -20,6 +20,7 @@ from mcp.server.fastmcp.resources.templates import ResourceTemplate
 
 from .auth import AuthResolver
 from .config import load_config
+from .config.model import Config
 from .dispatch import Dispatcher
 from .errors import RegistryUnavailableError
 from .registries import SkillContent, build_adapters
@@ -30,6 +31,41 @@ _DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=5.0)
 
 # URI template advertised to clients for skill resource access.
 _SKILL_URI_TEMPLATE = "skill://{registry}/{+skill}{?file}"
+
+_LIST_REGISTRIES_INTRO = (
+    "List all configured skill registries. "
+    "Returns a JSON array of objects, one per registry, with: "
+    "'name' (registry identifier), "
+    "'type' ('github' or 'http'), "
+    "optionally 'ref' (branch/tag/SHA for GitHub registries), "
+    "and optionally 'description' (human-readable registry purpose, when configured). "
+    "Call this first to discover available registries before listing or fetching skills."
+)
+
+
+def _build_list_registries_description(cfg: Config) -> str:
+    """Assemble the list_registries tool description from loaded configuration.
+
+    Starts with the static introductory text.  For each configured registry,
+    appends an entry that always includes the registry name, includes the
+    registry description when present, and includes the registry instructions
+    when present.  Registries with no instructions appear without a
+    call-to-action block.
+    """
+    if not cfg.registries:
+        return _LIST_REGISTRIES_INTRO
+
+    parts = [_LIST_REGISTRIES_INTRO, "\n\nConfigured registries:"]
+    for name, reg in cfg.registries.items():
+        entry = f"\n- {name}"
+        if reg.description:
+            entry += f": {reg.description}"
+            if reg.instructions:
+                entry += f". {reg.instructions}"
+        elif reg.instructions:
+            entry += f": {reg.instructions}"
+        parts.append(entry)
+    return "".join(parts)
 
 
 class _SkillResourceTemplate(ResourceTemplate):
@@ -101,17 +137,7 @@ def build_app(config_path: Path | None = None) -> FastMCP:
     # Tool: list_registries
     # ------------------------------------------------------------------
 
-    @mcp.tool(
-        description=(
-            "List all configured skill registries. "
-            "Returns a JSON array of objects, one per registry, with: "
-            "'name' (registry identifier), "
-            "'type' ('github' or 'http'), "
-            "optionally 'ref' (branch/tag/SHA for GitHub registries), "
-            "and optionally 'description' (human-readable registry purpose, when configured). "
-            "Call this first to discover available registries before listing or fetching skills."
-        )
-    )
+    @mcp.tool(description=_build_list_registries_description(cfg))
     async def list_registries() -> str:
         return json.dumps(_disp().list_registries())
 

@@ -92,6 +92,7 @@ class GithubRegistry:
     auth: GithubAuthVariant = field(default_factory=NoAuth)
     cache_enabled: bool = True
     description: str | None = None
+    instructions: str | None = None
 
     @property
     def ref_is_sha(self) -> bool:
@@ -109,6 +110,7 @@ class HttpRegistry:
     auth: HttpAuthVariant = field(default_factory=NoAuth)
     cache_enabled: bool = True
     description: str | None = None
+    instructions: str | None = None
 
 
 RegistryVariant = GithubRegistry | HttpRegistry

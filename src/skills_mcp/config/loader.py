@@ -217,6 +217,8 @@ def _parse_github_registry(name: str, raw: dict[str, Any]) -> GithubRegistry:
     cache_enabled = bool(raw.get("cache_enabled", True))
     raw_desc = raw.get("description")
     description = str(raw_desc) if isinstance(raw_desc, str) and raw_desc else None
+    raw_instr = raw.get("instructions")
+    instructions = str(raw_instr) if isinstance(raw_instr, str) and raw_instr else None
     return GithubRegistry(
         name=name,
         owner=str(raw["owner"]),
@@ -226,6 +228,7 @@ def _parse_github_registry(name: str, raw: dict[str, Any]) -> GithubRegistry:
         auth=auth,
         cache_enabled=cache_enabled,
         description=description,
+        instructions=instructions,
     )
 
 
@@ -237,6 +240,8 @@ def _parse_http_registry(name: str, raw: dict[str, Any]) -> HttpRegistry:
     cache_enabled = bool(raw.get("cache_enabled", True))
     raw_desc = raw.get("description")
     description = str(raw_desc) if isinstance(raw_desc, str) and raw_desc else None
+    raw_instr = raw.get("instructions")
+    instructions = str(raw_instr) if isinstance(raw_instr, str) and raw_instr else None
     return HttpRegistry(
         name=name,
         url=str(raw["url"]),
@@ -244,6 +249,7 @@ def _parse_http_registry(name: str, raw: dict[str, Any]) -> HttpRegistry:
         auth=auth,
         cache_enabled=cache_enabled,
         description=description,
+        instructions=instructions,
     )
 
 
