@@ -15,9 +15,6 @@ class Dispatcher:
     ) -> None:
         self._adapters = adapters
 
-    async def list_skills(self, registry: str) -> list[str]:
-        return await self._get_adapter(registry).list_skills()
-
     async def list_skills_metadata(
         self, registry: str, *, refresh: bool = False
     ) -> list[dict[str, object]]:
