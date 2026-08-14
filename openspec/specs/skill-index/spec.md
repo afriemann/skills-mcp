@@ -32,6 +32,11 @@ Concurrent `list_skills` calls for the same registry within the same process SHA
 serialised via an `anyio.Lock` (one per `CachingRegistry` instance) to prevent lost index
 updates and redundant fetch storms.
 
+Skill identifiers SHALL be preserved verbatim through all cache paths, including identifiers
+that contain forward slashes (e.g. `quality/reviewing/code-review`). The index key, the
+`"name"` field in returned metadata, and the per-skill content cache key SHALL all use the
+full, unmodified identifier string.
+
 #### Scenario: New skill is added to index on first listing
 - **WHEN** `list_skills` is called and a skill identifier is not yet in the cached index
 - **THEN** the skill's SKILL.md is fetched, its frontmatter is parsed, and the entry is persisted in the index
@@ -63,3 +68,15 @@ updates and redundant fetch storms.
 #### Scenario: Concurrent list_skills calls are serialised per registry
 - **WHEN** two concurrent `list_skills` calls target the same registry
 - **THEN** the second call waits for the first to complete before reading or writing the index
+
+#### Scenario: Nested-path identifier preserved verbatim on cold index
+- **WHEN** `list_skills_metadata` is called for the first time and a skill identifier contains a forward slash
+- **THEN** the returned entry's `"name"` field equals the full identifier string including the slash
+
+#### Scenario: Nested-path identifier preserved verbatim from warm index
+- **WHEN** `list_skills_metadata` is called a second time and the index was populated with a slash-containing identifier on the first call
+- **THEN** the returned entry's `"name"` field still equals the full identifier string
+
+#### Scenario: Stale flat identifier retired when registry renames skill to nested path
+- **WHEN** `list_skills_metadata` is called after the registry returns a new nested-path identifier for a skill that previously had a flat (slash-free) name
+- **THEN** the old flat-name entry is absent from the result and the new nested-path entry is present with the correct `"name"` field

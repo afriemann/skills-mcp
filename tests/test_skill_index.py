@@ -315,3 +315,91 @@ async def test_ttl_expiry_triggers_full_rebuild(tmp_path: Path):
         assert inner.fetch_calls.get(skill, 0) > fetches_first.get(skill, 0), (
             f"TTL expiry: {skill!r} must be re-fetched on the second call"
         )
+
+
+# ---------------------------------------------------------------------------
+# Scenario: Nested-path identifier preserved verbatim on cold index
+# ---------------------------------------------------------------------------
+
+
+async def test_nested_path_identifier_preserved_verbatim_on_cold_index(tmp_path: Path):
+    """A slash-containing skill identifier is returned verbatim on the first (cold) call.
+
+    Regression: flat-name fixtures do not exercise the percent-encoding path in
+    DiskCache._path(); this test ensures the full 'a/b/c' string survives both the
+    upstream list round-trip and the index serialisation/deserialisation.
+    """
+    inner = FakeInnerWithFrontmatter(skills=["quality/reviewing/code-review"])
+    caching = _make_caching(inner, tmp_path)
+
+    result = await caching.list_skills_metadata()
+
+    names = [r["name"] for r in result]
+    assert names == ["quality/reviewing/code-review"], (
+        f"nested-path identifier must be preserved verbatim; got: {names!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Scenario: Nested-path identifier preserved verbatim from warm index
+# ---------------------------------------------------------------------------
+
+
+async def test_nested_path_identifier_preserved_verbatim_from_warm_index(tmp_path: Path):
+    """A slash-containing identifier written to the index is read back unchanged.
+
+    Verifies that the index serialisation round-trip (JSON write → JSON read) preserves
+    the full path string and that the warm-index path returns the correct 'name' field.
+    """
+    inner = FakeInnerWithFrontmatter(skills=["quality/reviewing/code-review"])
+    caching = _make_caching(inner, tmp_path)
+
+    # Cold call — populates index
+    await caching.list_skills_metadata()
+    fetches_after_cold = _total_fetches(inner)
+
+    # Warm call — should read from index without fetching
+    result = await caching.list_skills_metadata()
+    assert _total_fetches(inner) == fetches_after_cold, (
+        "warm index: nested-path skill must not trigger a re-fetch"
+    )
+
+    names = [r["name"] for r in result]
+    assert names == ["quality/reviewing/code-review"], (
+        f"nested-path identifier must survive the index serialisation round-trip; got: {names!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Scenario: Stale flat identifier retired when registry renames to nested path
+# ---------------------------------------------------------------------------
+
+
+async def test_stale_flat_identifier_retired_when_registry_renames_skill_to_nested_path(
+    tmp_path: Path,
+) -> None:
+    """When a skill is renamed from a flat to a nested-path identifier, the old name
+    is retired and the new full path appears.
+
+    Simulates the real-world scenario where a registry is reorganised (e.g. 'code-review'
+    moves to 'quality/reviewing/code-review'): after TTL expiry the stale flat name must
+    not appear in the result and the new nested-path name must be present.
+    """
+    inner = FakeInnerWithFrontmatter(skills=["code-review"])
+    caching = _make_caching(inner, tmp_path, ttl=0)  # ttl=0 so names list expires immediately
+
+    # First call with the old flat name
+    result_before = await caching.list_skills_metadata()
+    assert [r["name"] for r in result_before] == ["code-review"]
+
+    # Registry renames the skill to a nested path
+    inner._skills = ["quality/reviewing/code-review"]
+
+    # Second call after TTL expiry — index rebuilt from the new names list
+    result_after = await caching.list_skills_metadata()
+    names_after = [r["name"] for r in result_after]
+
+    assert "code-review" not in names_after, "stale flat-name entry must be retired after rename"
+    assert "quality/reviewing/code-review" in names_after, (
+        f"new nested-path identifier must be present after rename; got: {names_after!r}"
+    )
