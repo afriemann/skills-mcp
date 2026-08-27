@@ -156,6 +156,11 @@ def build_app(config_path: Path | None = None) -> FastMCP:
         description=(
             "Retrieve a skill's SKILL.md content and companion file list from a named registry. "
             "Skills provide workflows, best practices, procedures, and reference materials for agents. "
+            "**Important:** This tool fetches content from remote registries only (GitHub or HTTP). "
+            "It cannot read locally-deployed skills (those listed in `available_skills`). "
+            "To load a local skill's hub, use the built-in `skill` tool. "
+            "To load a local skill's companion reference files, use the `read` tool "
+            "with the path `~/.agents/skills/<name>/references/<file>`. "
             "\n\n"
             "When called without 'file': returns a JSON object with "
             "'content' (the full SKILL.md text) and "
