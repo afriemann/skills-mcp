@@ -3,18 +3,40 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import math
+import re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import PurePosixPath
+from urllib.parse import quote
 
+import anyio
 import httpx
+from anyio.lowlevel import checkpoint_if_cancelled
 
 from ..auth import AuthResolver
-from ..config.model import GithubRegistry
+from ..config.model import (
+    REPO_CLEANUP_MAX_SECONDS,
+    REPO_CLEANUP_RESERVE_FRACTION,
+    REPO_LISTING_MAX_BYTES,
+    REPO_METADATA_MAX_BYTES,
+    REPO_METADATA_TOTAL_BYTES,
+    REPO_OPERATION_SECONDS,
+    REPO_PATH_MAX_COMPONENTS,
+    REPO_TEXT_MAX_BYTES,
+    REPO_TREE_MAX_ENTRIES,
+    GithubRegistry,
+)
 from ..errors import (
     PathTraversalError,
     RegistryUnavailableError,
+    RepositoryTargetError,
     SkillFileNotFoundError,
     SkillNotFoundError,
+    UnsupportedOperationError,
 )
 from . import SkillContent
 
@@ -26,6 +48,59 @@ _JSON_ACCEPT = "application/vnd.github+json"
 
 # Maximum Retry-After we will honour (seconds).
 _MAX_RETRY_AFTER = 5.0
+
+_REPO_MODES = {
+    "100644": ("blob", "file"),
+    "100755": ("blob", "file"),
+    "040000": ("tree", "directory"),
+    "120000": ("blob", "symlink"),
+    "160000": ("commit", "submodule"),
+}
+
+
+@dataclass(frozen=True)
+class _RepoEntry:
+    path: str
+    kind: str
+    sha: str
+    size: int | None
+
+
+@dataclass
+class _RepoBudget:
+    deadline: float
+    cleanup_seconds: float
+    metadata_bytes: int = 0
+
+
+def _repo_retry_delay(headers: httpx.Headers) -> float:
+    try:
+        parsed = float(headers["Retry-After"])
+    except ValueError:
+        return 0
+    return min(max(parsed, 0), _MAX_RETRY_AFTER) if math.isfinite(parsed) else 0
+
+
+def _repo_parts(path: str, *, root: bool = False) -> list[str]:
+    if path == "" and root:
+        return []
+    parts = path.split("/")
+    if (
+        len(parts) > REPO_PATH_MAX_COMPONENTS
+        or "\\" in path
+        or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in path)
+        or any(part in ("", ".", "..") for part in parts)
+    ):
+        raise PathTraversalError(
+            "Use a literal repository-relative POSIX path without dot, empty, control, or backslash components"
+        )
+    return parts
+
+
+def _repo_sha(value: object) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[a-fA-F0-9]{40}", value) is None:
+        raise RegistryUnavailableError("GitHub repository metadata contains an invalid object SHA")
+    return value
 
 
 class _NotFoundError(Exception):
@@ -63,6 +138,258 @@ class GithubAdapter:
         self._auth = auth_resolver
         self.name = config.name
         self.ref: str | None = config.ref
+
+    async def get_registry_source(self) -> dict[str, object]:
+        cfg = self._config
+        return {
+            "registry": self.name,
+            "type": self.type,
+            "url": f"https://github.com/{cfg.owner}/{cfg.repo}",
+            "owner": cfg.owner,
+            "repo": cfg.repo,
+            "ref": cfg.ref,
+            "skills_dir": cfg.skills_dir,
+        }
+
+    async def list_repo_entries(self, path: str = "") -> dict[str, object]:
+        return await self._repo_operation(path, read_file=False)
+
+    async def read_repo_text_file(self, path: str) -> dict[str, object]:
+        return await self._repo_operation(path, read_file=True)
+
+    async def _repo_operation(self, path: str, *, read_file: bool) -> dict[str, object]:
+        parts = _repo_parts(path, root=not read_file)
+        reserve = min(
+            REPO_CLEANUP_MAX_SECONDS, REPO_OPERATION_SECONDS * REPO_CLEANUP_RESERVE_FRACTION
+        )
+        budget = _RepoBudget(anyio.current_time() + REPO_OPERATION_SECONDS, reserve)
+        try:
+            with anyio.fail_after(REPO_OPERATION_SECONDS - reserve):
+                commit = await self._repo_json(
+                    f"commits/{quote(self._config.ref, safe='')}", budget
+                )
+                try:
+                    commit_sha = _repo_sha(commit["sha"])
+                    commit_body = commit["commit"]
+                    if not isinstance(commit_body, dict) or not isinstance(
+                        commit_body.get("tree"), dict
+                    ):
+                        raise TypeError
+                    tree_sha = _repo_sha(commit_body["tree"]["sha"])
+                except (KeyError, TypeError):
+                    raise RegistryUnavailableError(
+                        "GitHub repository commit metadata is malformed"
+                    ) from None
+                target, tree_sha = await self._repo_target(
+                    parts, tree_sha, budget, read_file=read_file
+                )
+                result: dict[str, object] = {
+                    "source": await self.get_registry_source(),
+                    "path": path,
+                    "commit_sha": commit_sha,
+                }
+                if read_file:
+                    result["content"] = await self._repo_text(target, budget)
+                else:
+                    listed: list[dict[str, object]] = []
+                    for entry in sorted(
+                        await self._repo_tree(tree_sha, budget), key=lambda e: e.path
+                    ):
+                        item: dict[str, object] = {
+                            "path": f"{path}/{entry.path}" if path else entry.path,
+                            "type": entry.kind,
+                        }
+                        if entry.size is not None:
+                            item["size"] = entry.size
+                        listed.append(item)
+                    result["entries"] = listed
+                    if len(json.dumps(result).encode("utf-8")) > REPO_LISTING_MAX_BYTES:
+                        raise RegistryUnavailableError(
+                            "Repository listing output budget exceeded; no partial listing returned"
+                        )
+                return result
+        except TimeoutError:
+            raise RegistryUnavailableError(
+                "GitHub repository operation deadline exceeded"
+            ) from None
+
+    async def _repo_target(
+        self, parts: list[str], tree_sha: str, budget: _RepoBudget, *, read_file: bool
+    ) -> tuple[_RepoEntry | None, str]:
+        target: _RepoEntry | None = None
+        for index, part in enumerate(parts):
+            entries = await self._repo_tree(tree_sha, budget)
+            target = next((entry for entry in entries if entry.path == part), None)
+            if target is None:
+                raise RepositoryTargetError(
+                    "Repository target not found; list its parent directory"
+                )
+            if target.kind in ("symlink", "submodule"):
+                raise UnsupportedOperationError(
+                    f"Repository {target.kind} targets cannot be followed"
+                )
+            if index < len(parts) - 1 or not read_file:
+                if target.kind != "directory":
+                    raise RepositoryTargetError("Repository target is not a directory")
+                tree_sha = target.sha
+        return target, tree_sha
+
+    async def _repo_text(self, target: _RepoEntry | None, budget: _RepoBudget) -> str:
+        if target is None or target.kind != "file":
+            raise RepositoryTargetError("Repository target is not a regular file")
+        if target.size is not None and target.size > REPO_TEXT_MAX_BYTES:
+            raise RepositoryTargetError("Repository text file exceeds 1 MiB")
+        raw = await self._repo_request(f"git/blobs/{target.sha}", budget, file=True)
+        try:
+            content = raw.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            raise RepositoryTargetError("Repository file is not strict UTF-8 text") from None
+        if "\x00" in content:
+            raise RepositoryTargetError("Repository file contains NUL bytes, not text")
+        return content
+
+    async def _repo_tree(self, sha: str, budget: _RepoBudget) -> list[_RepoEntry]:
+        data = await self._repo_json(f"git/trees/{sha}", budget)
+        raw_entries = data.get("tree")
+        if (
+            data.get("truncated") is not False
+            or not isinstance(raw_entries, list)
+            or len(raw_entries) > REPO_TREE_MAX_ENTRIES
+        ):
+            raise RegistryUnavailableError(
+                "GitHub repository tree metadata is incomplete or exceeds entry budget"
+            )
+        entries: list[_RepoEntry] = []
+        seen: set[str] = set()
+        for raw in raw_entries:
+            if not isinstance(raw, dict):
+                raise RegistryUnavailableError("GitHub repository entry metadata is malformed")
+            name, mode, kind = raw.get("path"), raw.get("mode"), raw.get("type")
+            size = raw.get("size")
+            if (
+                not isinstance(name, str)
+                or not isinstance(mode, str)
+                or mode not in _REPO_MODES
+                or kind != _REPO_MODES[mode][0]
+                or name in seen
+                or (size is not None and (type(size) is not int or size < 0))
+            ):
+                raise RegistryUnavailableError("GitHub repository entry metadata is malformed")
+            try:
+                if len(_repo_parts(name)) != 1:
+                    raise PathTraversalError("Expected one component")
+            except PathTraversalError:
+                raise RegistryUnavailableError(
+                    "GitHub repository path metadata is malformed"
+                ) from None
+            seen.add(name)
+            entries.append(_RepoEntry(name, _REPO_MODES[mode][1], _repo_sha(raw.get("sha")), size))
+        return entries
+
+    async def _repo_json(self, suffix: str, budget: _RepoBudget) -> dict[str, object]:
+        raw = await self._repo_request(suffix, budget)
+        try:
+            data = json.loads(raw)
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            raise RegistryUnavailableError("GitHub repository metadata is malformed JSON") from None
+        if not isinstance(data, dict):
+            raise RegistryUnavailableError("GitHub repository metadata is not an object")
+        return data
+
+    async def _repo_request(self, suffix: str, budget: _RepoBudget, *, file: bool = False) -> bytes:
+        cfg = self._config
+        base = f"{_GITHUB_API}/repos/{quote(cfg.owner, safe='')}/{quote(cfg.repo, safe='')}"
+        try:
+            headers = await self._auth.headers_for(cfg.auth)
+        except RegistryUnavailableError:
+            raise RegistryUnavailableError(
+                "GitHub repository authentication unavailable; check configured credentials"
+            ) from None
+        headers = {
+            **headers,
+            "Accept": "application/vnd.github.raw+json" if file else _JSON_ACCEPT,
+            "Accept-Encoding": "identity",
+        }
+        retry_allowed = True
+        while True:
+            delay: float | None = None
+            try:
+                async with self._repo_stream(f"{base}/{suffix}", headers, budget) as response:
+                    status = response.status_code
+                    if status in (403, 429) and retry_allowed and "Retry-After" in response.headers:
+                        retry_allowed = False
+                        delay = _repo_retry_delay(response.headers)
+                    elif status != 200:
+                        raise RegistryUnavailableError(
+                            f"GitHub repository request failed (HTTP {status}); check configured source, ref and access"
+                        )
+                    if delay is None:
+                        return await self._repo_read_bounded(response, budget, file=file)
+            except httpx.HTTPError:
+                raise RegistryUnavailableError(
+                    "GitHub repository request failed; check connectivity and configured access"
+                ) from None
+            if delay is not None:
+                await anyio.sleep(delay)
+
+    async def _repo_read_bounded(
+        self, response: httpx.Response, budget: _RepoBudget, *, file: bool
+    ) -> bytes:
+        if response.headers.get("Content-Encoding", "identity").lower() != "identity":
+            raise RegistryUnavailableError(
+                "GitHub repository response used unsupported content encoding"
+            )
+        if not isinstance(response.stream, httpx.AsyncByteStream):
+            raise RegistryUnavailableError("GitHub repository response is not an async stream")
+        limit = REPO_TEXT_MAX_BYTES if file else REPO_METADATA_MAX_BYTES
+        data = bytearray()
+        # Iterate the identity-encoded transport stream directly: HTTPX's aiter_*
+        # auto-closes at EOF before our bounded, cancellation-safe close can run.
+        async for chunk in response.stream:
+            if not file:
+                budget.metadata_bytes += len(chunk)
+                if budget.metadata_bytes > REPO_METADATA_TOTAL_BYTES:
+                    raise RegistryUnavailableError(
+                        "GitHub repository cumulative metadata budget exceeded"
+                    )
+            if len(data) + len(chunk) > limit:
+                if file:
+                    raise RepositoryTargetError("Repository text file exceeds 1 MiB")
+                raise RegistryUnavailableError(
+                    "GitHub repository metadata response budget exceeded"
+                )
+            data.extend(chunk)
+        return bytes(data)
+
+    @asynccontextmanager
+    async def _repo_stream(
+        self, url: str, headers: dict[str, str], budget: _RepoBudget
+    ) -> AsyncIterator[httpx.Response]:
+        async with self._client.stream(
+            "GET", url, headers=headers, follow_redirects=False
+        ) as response:
+            completed = False
+            try:
+                yield response
+                completed = True
+            finally:
+                close_deadline = min(budget.deadline, anyio.current_time() + budget.cleanup_seconds)
+                cleanup_error = None
+                try:
+                    with anyio.CancelScope(deadline=close_deadline, shield=True) as cleanup:
+                        await response.aclose()
+                except Exception:
+                    cleanup_error = "GitHub repository response cleanup failed"
+                if completed:
+                    # Deliver cancellation that first arrived inside the cleanup shield.
+                    await checkpoint_if_cancelled()
+                    if cleanup_error is not None:
+                        raise RegistryUnavailableError(cleanup_error) from None
+                    # Check the final cancellation state after the cleanup scope has exited.
+                    if cleanup.cancel_called:
+                        raise RegistryUnavailableError(
+                            "GitHub repository response cleanup deadline exceeded"
+                        )
 
     # ------------------------------------------------------------------
     # RegistryAdapter protocol

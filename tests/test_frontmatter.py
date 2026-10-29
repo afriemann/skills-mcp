@@ -1,4 +1,4 @@
-# spec: openspec/changes/skill-listing-frontmatter-index/specs/frontmatter-parsing/spec.md
+# spec: openspec/specs/frontmatter-parsing/spec.md
 """Unit tests for the SKILL.md frontmatter parser (parse_frontmatter)."""
 
 import pytest

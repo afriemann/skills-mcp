@@ -15,6 +15,15 @@ class Dispatcher:
     ) -> None:
         self._adapters = adapters
 
+    async def get_registry_source(self, registry: str) -> dict[str, object]:
+        return await self._get_adapter(registry).get_registry_source()
+
+    async def list_repo_entries(self, registry: str, path: str = "") -> dict[str, object]:
+        return await self._get_adapter(registry).list_repo_entries(path)
+
+    async def read_repo_text_file(self, registry: str, path: str) -> dict[str, object]:
+        return await self._get_adapter(registry).read_repo_text_file(path)
+
     async def list_skills_metadata(
         self, registry: str, *, refresh: bool = False
     ) -> list[dict[str, object]]:

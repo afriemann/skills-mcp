@@ -1,6 +1,6 @@
 """Tests for the registry instructions field and _build_list_skills_description.
 
-# spec: openspec/changes/registry-instructions-field/specs/registry-instructions/spec.md
+# spec: openspec/specs/registry-instructions/spec.md
 """
 
 import json

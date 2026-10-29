@@ -46,6 +46,12 @@ class RegistryAdapter(Protocol):
     type: str
     ref: str | None
 
+    async def get_registry_source(self) -> dict[str, object]: ...
+
+    async def list_repo_entries(self, path: str = "") -> dict[str, object]: ...
+
+    async def read_repo_text_file(self, path: str) -> dict[str, object]: ...
+
     async def list_skills(self) -> list[str]: ...
 
     async def fetch_skill(self, skill: str) -> SkillContent: ...
@@ -60,6 +66,12 @@ class MetadataRegistry(Protocol):
     name: str
     type: str
     ref: str | None
+
+    async def get_registry_source(self) -> dict[str, object]: ...
+
+    async def list_repo_entries(self, path: str = "") -> dict[str, object]: ...
+
+    async def read_repo_text_file(self, path: str) -> dict[str, object]: ...
 
     async def list_skills(self) -> list[str]: ...
 
@@ -96,6 +108,15 @@ class CachingRegistry:
 
         # Per-instance lock serialising index read-modify-write
         self._index_lock: anyio.Lock = anyio.Lock()
+
+    async def get_registry_source(self) -> dict[str, object]:
+        return await self._inner.get_registry_source()
+
+    async def list_repo_entries(self, path: str = "") -> dict[str, object]:
+        return await self._inner.list_repo_entries(path)
+
+    async def read_repo_text_file(self, path: str) -> dict[str, object]:
+        return await self._inner.read_repo_text_file(path)
 
     async def list_skills(self) -> list[str]:
         ref = self._inner.ref or "_http"

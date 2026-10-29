@@ -1,4 +1,4 @@
-# spec: openspec/changes/skills-mcp-server/specs/skills-mcp/spec.md
+# spec: openspec/specs/skills-mcp/spec.md
 """Tests for the CachingRegistry decorator (§Read-Through Disk Cache)."""
 
 from pathlib import Path
@@ -25,6 +25,19 @@ class FakeInnerAdapter:
         self.list_calls = 0
         self.fetch_calls = 0
         self.file_calls = 0
+        self.repo_calls = 0
+
+    async def get_registry_source(self) -> dict[str, object]:
+        self.repo_calls += 1
+        return {"call": self.repo_calls}
+
+    async def list_repo_entries(self, path: str = "") -> dict[str, object]:
+        self.repo_calls += 1
+        return {"path": path, "call": self.repo_calls}
+
+    async def read_repo_text_file(self, path: str) -> dict[str, object]:
+        self.repo_calls += 1
+        return {"path": path, "call": self.repo_calls}
 
     async def list_skills(self) -> list[str]:
         self.list_calls += 1
@@ -60,6 +73,30 @@ class FailOnFirstFetchAdapter(FakeInnerAdapter):
 def _make_caching(inner: FakeInnerAdapter, tmp_path: Path, enabled: bool = True) -> CachingRegistry:
     cache = DiskCache(tmp_path / "cache", enabled=enabled, ttl_seconds=3600)
     return CachingRegistry(inner, cache, immutable=False, enabled=enabled)
+
+
+# spec: openspec/specs/skills-mcp/spec.md
+@pytest.mark.parametrize("immutable", [False, True])
+@pytest.mark.parametrize(
+    "method", ["get_registry_source", "list_repo_entries", "read_repo_text_file"]
+)
+async def test_repository_operations_bypass_disk_cache(tmp_path, monkeypatch, method, immutable):
+    inner = FakeInnerAdapter()
+    cache = DiskCache(tmp_path / "cache", enabled=True, ttl_seconds=3600)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Repository operation accessed the disk cache")
+
+    monkeypatch.setattr(cache, "get", forbidden)
+    monkeypatch.setattr(cache, "put", forbidden)
+    registry = CachingRegistry(inner, cache, immutable=immutable, enabled=True)
+    args = () if method == "get_registry_source" else ("tools/check.py",)
+    first = await getattr(registry, method)(*args)
+    second = await getattr(registry, method)(*args)
+    assert first.get("call") == 1
+    assert second.get("call") == 2
+    if args:
+        assert second["path"] == args[0]
 
 
 # ---------------------------------------------------------------------------

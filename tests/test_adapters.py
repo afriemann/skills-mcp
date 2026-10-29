@@ -1,9 +1,12 @@
 """Tests for HTTP and GitHub registry adapters using fake httpx transports."""
 
-# spec: openspec/changes/github-nested-skill-discovery/specs/skills-mcp/spec.md
+# spec: openspec/specs/skills-mcp/spec.md
 
+import json
+from dataclasses import replace
 from typing import Any
 
+import anyio
 import httpx
 import pytest
 
@@ -135,6 +138,484 @@ def gh_config() -> GithubRegistry:
         ref="main",
         auth=NoAuth(),
     )
+
+
+# spec: openspec/specs/skills-mcp/spec.md
+class RepoStream(httpx.AsyncByteStream):
+    def __init__(self, chunks):
+        self.chunks = chunks
+        self.closed = False
+        self.consumed = 0
+        self.delay = False
+        self.close_delay = 0
+        self.close_failure = None
+        self.close_attempted = False
+        self.read_started = None
+        self.close_started = None
+        self.close_release = None
+
+    async def __aiter__(self):
+        for chunk in self.chunks:
+            self.consumed += 1
+            if self.delay:
+                if self.read_started is not None:
+                    self.read_started.set()
+                await anyio.sleep(1)
+            yield chunk
+
+    async def aclose(self):
+        self.close_attempted = True
+        if self.close_started is not None:
+            self.close_started.set()
+            await self.close_release.wait()
+        await anyio.sleep(self.close_delay)
+        if self.close_failure is not None:
+            raise self.close_failure
+        self.closed = True
+
+
+class RepoTransport(httpx.AsyncBaseTransport):
+    """Git Trees/Commits payloads from the official GitHub REST examples."""
+
+    commit = "1" * 40
+    root = "2" * 40
+    directory = "3" * 40
+    blob = "4" * 40
+
+    def __init__(self, content=b"hello\n", mode="100644"):
+        self.calls = []
+        self.stream = RepoStream([content])
+        self.failure = None
+        self.delay = False
+        self.rate_limit = False
+        self.retry_sent = False
+        self.retry_after = "0"
+        self.retry_status = 429
+        self.exhaust_retries = False
+        self.opened = []
+        self.close_failure = None
+        self.retry_stream = RepoStream([b"private upstream diagnostic"])
+        self.commit_response = None
+        self.content_encoding = None
+        self.trees = {
+            self.root: {
+                "truncated": False,
+                "tree": [
+                    {"path": "tools", "mode": "040000", "type": "tree", "sha": self.directory},
+                    {
+                        "path": "README.md",
+                        "mode": mode,
+                        "type": "blob",
+                        "sha": self.blob,
+                        "size": len(content),
+                    },
+                    {"path": "sub", "mode": "160000", "type": "commit", "sha": self.blob},
+                    {"path": "link", "mode": "120000", "type": "blob", "sha": self.blob},
+                ],
+            },
+            self.directory: {
+                "truncated": False,
+                "tree": [
+                    {"path": "%2e%2e", "mode": "100755", "type": "blob", "sha": self.blob},
+                ],
+            },
+        }
+
+    async def handle_async_request(self, request):
+        self.calls.append(str(request.url))
+        if self.delay:
+            await anyio.sleep(1)
+        if self.failure is not None:
+            if isinstance(self.failure, Exception):
+                raise self.failure
+            stream = RepoStream([b"secret diagnostic"])
+            self.opened.append(stream)
+            return httpx.Response(
+                self.failure,
+                stream=stream,
+                headers={"Location": "https://elsewhere.invalid/secret"},
+            )
+        if self.retry_sent:
+            assert self.retry_stream.closed
+        if self.rate_limit or (self.retry_sent and self.exhaust_retries):
+            if self.retry_sent:
+                self.retry_stream = RepoStream([b"private upstream diagnostic"])
+            self.rate_limit = False
+            self.retry_sent = True
+            self.opened.append(self.retry_stream)
+            return httpx.Response(
+                self.retry_status,
+                stream=self.retry_stream,
+                headers={"Retry-After": self.retry_after},
+            )
+        path = request.url.path
+        if "/commits/" in path:
+            if self.commit_response is not None:
+                return self.json_response(self.commit_response)
+            resolved = (
+                self.commit if sum("/commits/" in url for url in self.calls) == 1 else "5" * 40
+            )
+            return self.json_response({"sha": resolved, "commit": {"tree": {"sha": self.root}}})
+        if "/git/trees/" in path:
+            return self.json_response(self.trees[path.rsplit("/", 1)[1]])
+        if "/git/blobs/" in path:
+            self.opened.append(self.stream)
+            return httpx.Response(200, stream=self.stream)
+        raise AssertionError(f"Unexpected request: {request.url}")
+
+    def json_response(self, payload):
+        stream = RepoStream(
+            [payload if isinstance(payload, bytes) else json.dumps(payload).encode()]
+        )
+        stream.close_failure = self.close_failure
+        self.opened.append(stream)
+        headers = {"Content-Encoding": self.content_encoding} if self.content_encoding else {}
+        return httpx.Response(200, stream=stream, headers=headers)
+
+
+# spec: openspec/specs/skills-mcp/spec.md
+class TestRepositoryAccess:
+    async def test_lists_repository_directories_with_provenance(self, gh_config):
+        transport = RepoTransport()
+        async with httpx.AsyncClient(transport=transport) as client:
+            adapter = GithubAdapter(gh_config, client, AuthResolver())
+            result = await adapter.list_repo_entries()
+            assert result.get("commit_sha") == transport.commit
+            assert result["path"] == ""
+            assert result["source"] == await adapter.get_registry_source()
+            assert [(e["path"], e["type"]) for e in result["entries"]] == [
+                ("README.md", "file"),
+                ("link", "symlink"),
+                ("sub", "submodule"),
+                ("tools", "directory"),
+            ]
+            nested = await adapter.list_repo_entries("tools")
+            assert nested["entries"] == [{"path": "tools/%2e%2e", "type": "file"}]
+
+    @pytest.mark.parametrize(
+        "method,path",
+        [
+            ("list_repo_entries", "absent"),
+            ("list_repo_entries", "README.md"),
+            ("read_repo_text_file", "tools"),
+            ("read_repo_text_file", "absent"),
+            ("read_repo_text_file", "README.md/child"),
+        ],
+    )
+    async def test_rejects_missing_or_wrong_kind_repository_targets(self, gh_config, method, path):
+        async with httpx.AsyncClient(transport=RepoTransport()) as client:
+            with pytest.raises(ValueError, match=r"not found|directory|file"):
+                await getattr(GithubAdapter(gh_config, client, AuthResolver()), method)(path)
+
+    @pytest.mark.parametrize("ref,encoded", [("main", "main"), ("feat/x", "feat%2Fx")])
+    async def test_keeps_moving_ref_operations_on_one_snapshot(self, gh_config, ref, encoded):
+        transport = RepoTransport()
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await GithubAdapter(
+                replace(gh_config, ref=ref), client, AuthResolver()
+            ).read_repo_text_file("tools/%2e%2e")
+        assert result.get("commit_sha") == transport.commit
+        assert sum("/commits/" in url for url in transport.calls) == 1
+        assert [url.rsplit("/", 1)[1] for url in transport.calls] == [
+            encoded,
+            transport.root,
+            transport.directory,
+            transport.blob,
+        ]
+
+    @pytest.mark.parametrize(
+        "method,path",
+        [
+            (method, path)
+            for method in ("list_repo_entries", "read_repo_text_file")
+            for path in [
+                "",
+                "/etc/passwd",
+                "../a",
+                "a/../b",
+                "./a",
+                "a//b",
+                "a/",
+                "a\\b",
+                "a\x00b",
+                "a\x85b",
+                "/".join(["a"] * 33),
+            ]
+            if path or method == "read_repo_text_file"
+        ],
+    )
+    async def test_rejects_unsafe_repository_paths_before_io(self, gh_config, path, method):
+        transport = RepoTransport()
+        async with httpx.AsyncClient(transport=transport) as client:
+            with pytest.raises(ValueError):
+                await getattr(GithubAdapter(gh_config, client, AuthResolver()), method)(path)
+        assert transport.calls == []
+
+    @pytest.mark.parametrize("path", ["link", "sub", "link/child", "sub/child"])
+    @pytest.mark.parametrize("method", ["list_repo_entries", "read_repo_text_file"])
+    async def test_rejects_symlink_and_submodule_targets(self, gh_config, path, method):
+        transport = RepoTransport()
+        async with httpx.AsyncClient(transport=transport) as client:
+            with pytest.raises(UnsupportedOperationError, match=r"symlink|submodule"):
+                await getattr(GithubAdapter(gh_config, client, AuthResolver()), method)(path)
+        assert not any("/git/blobs/" in url for url in transport.calls)
+
+    @pytest.mark.parametrize(
+        "content,mode",
+        [(b"", "100644"), ("héllo".encode(), "100755"), (b"a" * 1048576, "100644")],
+        ids=["empty", "executable", "exact-limit"],
+    )
+    async def test_reads_repository_text_with_provenance(self, gh_config, content, mode):
+        transport = RepoTransport(content, mode)
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await GithubAdapter(gh_config, client, AuthResolver()).read_repo_text_file(
+                "README.md"
+            )
+        assert result.get("content") == content.decode()
+        assert result["path"] == "README.md"
+        assert result["commit_sha"] == transport.commit
+        assert result["source"]["repo"] == "skills"
+        assert transport.stream.closed
+
+    @pytest.mark.parametrize("content", [b"\xff", b"a\x00b"])
+    async def test_rejects_non_text_repository_files(self, gh_config, content):
+        transport = RepoTransport(content)
+        async with httpx.AsyncClient(transport=transport) as client:
+            with pytest.raises(ValueError, match=r"UTF-8|NUL"):
+                await GithubAdapter(gh_config, client, AuthResolver()).read_repo_text_file(
+                    "README.md"
+                )
+        assert transport.stream.closed
+
+    async def test_rejects_advertised_oversized_files_before_download(self, gh_config):
+        transport = RepoTransport(b"a" * 1048577)
+        async with httpx.AsyncClient(transport=transport) as client:
+            with pytest.raises(ValueError, match="1 MiB"):
+                await GithubAdapter(gh_config, client, AuthResolver()).read_repo_text_file(
+                    "README.md"
+                )
+        assert not any("/git/blobs/" in url for url in transport.calls)
+
+    @pytest.mark.parametrize("close_failure", [False, True])
+    async def test_stops_oversized_downloads_and_closes_streams(self, gh_config, close_failure):
+        transport = RepoTransport()
+        transport.stream = RepoStream([b"a" * 1048576, b"b", b"never read"])
+        if close_failure:
+            transport.stream.close_failure = RuntimeError("secret diagnostic")
+        async with httpx.AsyncClient(transport=transport) as client:
+            with pytest.raises(ValueError, match="1 MiB"):
+                await GithubAdapter(gh_config, client, AuthResolver()).read_repo_text_file(
+                    "README.md"
+                )
+        assert transport.stream.closed or (close_failure and transport.stream.close_attempted)
+        assert transport.stream.consumed == 2
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            {"truncated": True, "tree": []},
+            {"tree": []},
+            {"truncated": False, "tree": [{}]},
+            {"truncated": False, "tree": ["not an entry"]},
+            ("commit", b"not json"),
+            ("commit", b"[]"),
+            ("commit", {"sha": "x"}),
+            ("commit", {"sha": "1" * 40, "commit": {}}),
+            ("commit", {"sha": "1" * 40, "commit": []}),
+            ("commit", {"sha": "1" * 40, "commit": {"tree": {}}}),
+            {
+                "truncated": False,
+                "tree": [{"path": "x", "mode": "999999", "type": "blob", "sha": "4" * 40}],
+            },
+            "REPO_METADATA_MAX_BYTES",
+            "REPO_TREE_MAX_ENTRIES",
+            "REPO_LISTING_MAX_BYTES",
+            {
+                "truncated": False,
+                "tree": [
+                    {"path": "unsafe\\name", "mode": "100644", "type": "blob", "sha": "4" * 40}
+                ],
+            },
+            {
+                "truncated": False,
+                "tree": [
+                    {"path": "control\x85name", "mode": "100644", "type": "blob", "sha": "4" * 40}
+                ],
+            },
+        ],
+    )
+    async def test_rejects_incomplete_or_malformed_repository_metadata(
+        self, gh_config, bad, monkeypatch
+    ):
+        transport = RepoTransport()
+        if isinstance(bad, str):
+            monkeypatch.setattr(f"skills_mcp.registries.github.{bad}", 1)
+        elif isinstance(bad, tuple):
+            transport.commit_response = bad[1]
+        else:
+            transport.trees[transport.root] = bad
+        async with httpx.AsyncClient(transport=transport) as client:
+            with pytest.raises(RegistryUnavailableError, match=r"metadata|incomplete|budget"):
+                await GithubAdapter(gh_config, client, AuthResolver()).list_repo_entries()
+
+    async def test_stops_operations_exceeding_cumulative_metadata_budget(
+        self, gh_config, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "skills_mcp.registries.github.REPO_METADATA_TOTAL_BYTES", 100, raising=False
+        )
+        transport = RepoTransport()
+        async with httpx.AsyncClient(transport=transport) as client:
+            with pytest.raises(RegistryUnavailableError, match="budget"):
+                await GithubAdapter(gh_config, client, AuthResolver()).list_repo_entries("tools")
+        assert transport.opened and all(stream.closed for stream in transport.opened)
+
+    @pytest.mark.parametrize("stage", ["request", "stream", "close"])
+    async def test_stops_repository_operations_at_deadline(self, gh_config, monkeypatch, stage):
+        monkeypatch.setattr(
+            "skills_mcp.registries.github.REPO_OPERATION_SECONDS", 0.1, raising=False
+        )
+        transport = RepoTransport()
+        transport.delay = stage == "request"
+        transport.stream.delay = stage == "stream"
+        transport.stream.close_delay = 1 if stage == "close" else 0
+        started = anyio.current_time()
+        async with httpx.AsyncClient(transport=transport) as client:
+            with pytest.raises(RegistryUnavailableError, match="deadline"):
+                await GithubAdapter(gh_config, client, AuthResolver()).read_repo_text_file(
+                    "README.md"
+                )
+        assert anyio.current_time() - started < 0.3
+        if stage == "stream":
+            assert transport.stream.closed
+
+    @pytest.mark.parametrize(
+        "status,retry_after,expected",
+        [(403, "0", 0), (429, "0", 0), (429, "900", 5), (429, "bad", 0), (429, "nan", 0)],
+    )
+    async def test_retries_repository_rate_limits_after_closing_response(
+        self, gh_config, monkeypatch, status, retry_after, expected
+    ):
+        transport = RepoTransport()
+        transport.rate_limit = True
+        transport.retry_status = status
+        transport.retry_after = retry_after
+        delays = []
+
+        async def sleep(seconds):
+            if transport.retry_stream.closed and len(transport.calls) == 1:
+                delays.append(seconds)
+
+        monkeypatch.setattr("skills_mcp.registries.github.anyio.sleep", sleep)
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await GithubAdapter(gh_config, client, AuthResolver()).list_repo_entries()
+        assert result.get("commit_sha") == "5" * 40
+        assert transport.retry_stream.closed
+        assert sum("/commits/" in url for url in transport.calls) == 2
+        assert delays == [expected]
+        assert all(stream.closed for stream in transport.opened)
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            301,
+            404,
+            401,
+            403,
+            429,
+            500,
+            "retry-exhausted",
+            "close-error",
+            "auth-unavailable",
+            "content-encoding",
+            httpx.ConnectError("secret diagnostic"),
+        ],
+    )
+    async def test_reports_sanitized_repository_infrastructure_errors(
+        self, gh_config, failure, monkeypatch
+    ):
+        transport = RepoTransport()
+        auth = AuthResolver()
+        if failure == "close-error":
+            transport.close_failure = RuntimeError("secret diagnostic")
+        elif failure == "auth-unavailable":
+
+            async def missing_auth(_config):
+                raise RegistryUnavailableError(
+                    "env SENSITIVE_CREDENTIAL_NAME missing; secret diagnostic"
+                )
+
+            monkeypatch.setattr(auth, "headers_for", missing_auth)
+        elif failure == "content-encoding":
+            transport.content_encoding = "gzip"
+        elif failure == "retry-exhausted":
+            transport.rate_limit = True
+            transport.exhaust_retries = True
+        else:
+            transport.failure = failure
+        async with httpx.AsyncClient(transport=transport) as client:
+            with pytest.raises(RegistryUnavailableError) as caught:
+                await GithubAdapter(gh_config, client, auth).list_repo_entries()
+        assert "secret" not in str(caught.value)
+        assert "SENSITIVE_CREDENTIAL_NAME" not in str(caught.value)
+        assert "https://" not in str(caught.value)
+        assert all(
+            stream.closed or (failure == "close-error" and stream.close_attempted)
+            for stream in transport.opened
+        )
+
+    @pytest.mark.parametrize(
+        "stage,outcome",
+        [
+            ("body", "success"),
+            ("body", "stalled"),
+            ("cleanup", "success"),
+            ("cleanup", "stalled"),
+            ("cleanup", "failure"),
+        ],
+    )
+    async def test_preserves_caller_cancellation_after_bounded_cleanup(
+        self, gh_config, monkeypatch, stage, outcome
+    ):
+        monkeypatch.setattr("skills_mcp.registries.github.REPO_OPERATION_SECONDS", 0.1)
+        transport = RepoTransport()
+        entered = anyio.Event()
+        release = anyio.Event()
+        transport.stream.delay = stage == "body"
+        if stage == "body":
+            transport.stream.read_started = entered
+        else:
+            transport.stream.close_started = entered
+            transport.stream.close_release = release
+        transport.stream.close_delay = 1 if outcome == "stalled" else 0
+        if outcome == "failure":
+            transport.stream.close_failure = RuntimeError("secret diagnostic")
+        results = []
+
+        async def read():
+            async with httpx.AsyncClient(transport=transport) as client:
+                try:
+                    await GithubAdapter(gh_config, client, AuthResolver()).read_repo_text_file(
+                        "README.md"
+                    )
+                except anyio.get_cancelled_exc_class():
+                    results.append("cancelled")
+                    raise
+                except RegistryUnavailableError:
+                    results.append("infrastructure error")
+                else:
+                    results.append("success")
+
+        started = anyio.current_time()
+        with anyio.fail_after(0.5):
+            async with anyio.create_task_group() as tasks:
+                tasks.start_soon(read)
+                await entered.wait()
+                tasks.cancel_scope.cancel()
+                release.set()
+        assert results == ["cancelled"]
+        assert anyio.current_time() - started < 0.5
+        assert transport.stream.closed is (outcome == "success")
 
 
 def _skills_dir_response() -> list[dict[str, Any]]:
