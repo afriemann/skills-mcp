@@ -1,0 +1,8 @@
+- [x] 1. Test-first source and tool routing per “Reports configured source without credentials”, “Tool list is stable”, “Rejects unknown repository registry” and “Rejects HTTP repository operations”; document interfaces in README.
+- [x] 2. Test-first uncached protocol/decorator forwarding per “Repository operations bypass disk cache” and design Integration.
+- [x] 3. Test-first snapshot traversal per “Lists repository directories with provenance”, “Rejects missing or wrong-kind repository targets” and “Keeps moving-ref operations on one snapshot”; document provenance.
+- [x] 4. Test-first path/mode boundaries per “Rejects unsafe repository paths before I/O” and “Rejects symlink and submodule targets”; document read boundaries.
+- [x] 5. Test-first bounded text reading per “Reads repository text with provenance”, “Rejects non-text repository files”, “Rejects advertised oversized files before download” and “Stops oversized downloads and closes streams”; document file limits.
+- [x] 6. Test-first metadata/deadline limits per “Rejects incomplete or malformed repository metadata”, “Stops operations exceeding cumulative metadata budget”, “Stops repository operations at deadline” and “Preserves caller cancellation after bounded cleanup”; document operation limits.
+- [x] 7. Test-first failures/retries per “Retries repository rate limits after closing response” and “Reports sanitized repository infrastructure errors”, using design Bounded transport; document diagnostics.
+- [x] 8. Verify “Resource template is advertised”, existing suite, coverage, lint/type/format checks, simplification self-review and independent code/security/architecture review against approved artifacts.

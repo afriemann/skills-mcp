@@ -12,6 +12,16 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+REPO_TEXT_MAX_BYTES = 1024 * 1024
+REPO_METADATA_MAX_BYTES = 2 * 1024 * 1024
+REPO_METADATA_TOTAL_BYTES = 8 * 1024 * 1024
+REPO_LISTING_MAX_BYTES = 2 * 1024 * 1024
+REPO_TREE_MAX_ENTRIES = 10000
+REPO_PATH_MAX_COMPONENTS = 32
+REPO_OPERATION_SECONDS = 60.0
+REPO_CLEANUP_MAX_SECONDS = 1.0
+REPO_CLEANUP_RESERVE_FRACTION = 0.1
+
 
 def _default_cache_dir() -> Path:
     """Return the platform-appropriate cache directory for skills-mcp.

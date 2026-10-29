@@ -1,8 +1,6 @@
 """Integration tests using in-memory MCP transport (create_connected_server_and_client_session)."""
 
-# spec: openspec/changes/skill-access-consolidation/specs/skills-mcp/spec.md
-# spec: openspec/changes/skill-listing-frontmatter-index/specs/skills-mcp/spec.md
-# spec: openspec/changes/remove-list-registries-tool/specs/skills-mcp/spec.md
+# spec: openspec/specs/skills-mcp/spec.md
 
 import json
 from pathlib import Path
@@ -241,17 +239,96 @@ async def _read_resource(app, uri: str) -> tuple[str, bool]:
 
 
 # ---------------------------------------------------------------------------
-# Scenario: Tool list is stable (exactly two tools)
+# Scenario: Tool list is stable
 # ---------------------------------------------------------------------------
 
 
+# spec: openspec/specs/skills-mcp/spec.md
 async def test_tool_list_is_stable(mcp_app):
-    """The server MUST advertise exactly two tools: list_skills, get_skill."""
-    expected = {"list_skills", "get_skill"}
+    """The server advertises the two skill tools and three read-only repository tools."""
+    expected = {
+        "list_skills",
+        "get_skill",
+        "get_registry_source",
+        "list_repo_entries",
+        "read_repo_text_file",
+    }
     async with create_connected_server_and_client_session(mcp_app) as session:
         tools = await session.list_tools()
     names = {t.name for t in tools.tools}
     assert names == expected, f"Expected {expected}, got {names}"
+    for tool in tools.tools:
+        if tool.name in expected - {"list_skills", "get_skill"}:
+            assert "untrusted" in tool.description.lower()
+
+
+# spec: openspec/specs/skills-mcp/spec.md
+async def test_reports_configured_source_without_credentials(mcp_app):
+    text, error = await _call(mcp_app, "get_registry_source", {"registry": "gh-skills"})
+    assert not error
+    assert json.loads(text) == {
+        "registry": "gh-skills",
+        "type": "github",
+        "url": "https://github.com/acme/skills",
+        "owner": "acme",
+        "repo": "skills",
+        "ref": "main",
+        "skills_dir": "skills",
+    }
+
+
+# spec: openspec/specs/skills-mcp/spec.md
+@pytest.mark.parametrize("tool", ["list_repo_entries", "read_repo_text_file"])
+@pytest.mark.parametrize("failure", [500, httpx.ConnectError("secret upstream diagnostic")])
+async def test_reports_sanitized_repository_infrastructure_errors(
+    mcp_app, monkeypatch, tool, failure
+):
+    original = IntegrationTransport.handle_async_request
+
+    async def fail_github(self, request):
+        if request.url.host != "api.github.com":
+            return await original(self, request)
+        if isinstance(failure, Exception):
+            raise failure
+        return httpx.Response(failure, text="secret upstream diagnostic")
+
+    monkeypatch.setattr(IntegrationTransport, "handle_async_request", fail_github)
+    text, error = await _call(mcp_app, tool, {"registry": "gh-skills", "path": "README.md"})
+    assert not error
+    assert json.loads(text)["error"].startswith("Error:")
+    assert "secret" not in text
+    assert "https://" not in text
+    other, other_error = await _call(
+        mcp_app, "get_skill", {"registry": "my-http", "skill": "http-skill"}
+    )
+    assert not other_error
+    assert json.loads(other)["content"] == "# HTTP Skill"
+
+
+# spec: openspec/specs/skills-mcp/spec.md
+@pytest.mark.parametrize(
+    "tool", ["get_registry_source", "list_repo_entries", "read_repo_text_file"]
+)
+async def test_rejects_unknown_repository_registry(mcp_app, tool):
+    args = {"registry": "missing"}
+    if tool != "get_registry_source":
+        args["path"] = "README.md"
+    text, error = await _call(mcp_app, tool, args)
+    assert error
+    assert "available registries" in text
+
+
+# spec: openspec/specs/skills-mcp/spec.md
+@pytest.mark.parametrize(
+    "tool", ["get_registry_source", "list_repo_entries", "read_repo_text_file"]
+)
+async def test_rejects_http_repository_operations(mcp_app, tool):
+    args = {"registry": "my-http"}
+    if tool != "get_registry_source":
+        args["path"] = "README.md"
+    text, error = await _call(mcp_app, tool, args)
+    assert error
+    assert "HTTP registries" in text
 
 
 # ---------------------------------------------------------------------------

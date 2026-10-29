@@ -26,6 +26,10 @@ class UnsupportedOperationError(ValueError):
     """The operation is not supported by this registry type (e.g. get_skill_file on HTTP)."""
 
 
+class RepositoryTargetError(ValueError):
+    """Repository path is missing, wrong-kind, unsupported, oversized, or non-text."""
+
+
 class RegistryUnavailableError(Exception):
     """Infrastructure failure: HTTP error, timeout, rate limit, auth env-var missing.
 

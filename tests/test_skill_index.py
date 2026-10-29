@@ -1,4 +1,4 @@
-# spec: openspec/changes/skill-listing-frontmatter-index/specs/skill-index/spec.md
+# spec: openspec/specs/skill-index/spec.md
 """Unit tests for the incremental skill index in CachingRegistry."""
 
 from pathlib import Path

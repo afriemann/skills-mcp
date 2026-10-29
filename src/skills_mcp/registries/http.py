@@ -39,6 +39,18 @@ class HttpAdapter:
     async def list_skills(self) -> list[str]:
         return [self._config.skill_name]
 
+    async def get_registry_source(self) -> dict[str, object]:
+        raise UnsupportedOperationError(
+            "Repository operations require a configured GitHub registry; HTTP registries "
+            "expose only a single skill. Use list_skills or get_skill instead."
+        )
+
+    async def list_repo_entries(self, path: str = "") -> dict[str, object]:
+        return await self.get_registry_source()
+
+    async def read_repo_text_file(self, path: str) -> dict[str, object]:
+        return await self.get_registry_source()
+
     async def fetch_skill(self, skill: str) -> SkillContent:
         if skill != self._config.skill_name:
             raise SkillNotFoundError(
