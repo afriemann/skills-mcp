@@ -4,7 +4,7 @@ Guidelines for AI agents working on this codebase.
 
 ## Project overview
 
-`skills-mcp` is a Python MCP server (stdio transport) that lets agents browse and fetch skill files from remote registries — GitHub repositories or direct HTTP URLs — without local installation. It exposes four MCP tools: `list_registries`, `list_skills`, `get_skill`, `get_skill_file`.
+`skills-mcp` is a Python MCP server (stdio transport) that lets agents browse and fetch skill files from remote registries — GitHub repositories or direct HTTP URLs — without local installation. It exposes five MCP tools: `list_skills`, `get_skill`, `get_registry_source`, `list_repo_entries`, `read_repo_text_file` (plus the `skill://` resource template).
 
 ## Development commands
 
@@ -32,13 +32,13 @@ Pre-commit hooks run automatically on `git commit`. Install once with `pre-commi
 Strict one-directional layering — never import from a higher layer into a lower one:
 
 ```
-L0  errors.py              — exception types (ValueError subclasses for model-recoverable; RegistryUnavailableError for infra)
+L0  errors.py              — exception types (ModelRecoverableError subclasses (a ValueError subclass) for model-recoverable; RegistryUnavailableError for infra)
 L1  config/                — frozen-dataclass config model, JSONC loader (fail-fast with sys.exit on bad config)
     auth.py                — AuthResolver (headers_for), gh_cli token cached in-process
     cache.py               — DiskCache (mtime TTL, atomic writes, 0700 root, percent-encoded paths)
 L2  registries/            — RegistryAdapter Protocol; CachingRegistry decorator; GithubAdapter; HttpAdapter
 L3  dispatch.py            — Dispatcher: routes operations to named adapters
-L4  server.py              — build_app() factory; four MCP tools; FastMCP lifespan (shared httpx.AsyncClient)
+L4  server.py              — build_app() factory; five MCP tools + one resource template; MCPServer lifespan (shared httpx.AsyncClient)
 L5  __main__.py            — CLI entry (argparse); anyio.run(_run_with_graceful_shutdown)
 ```
 
@@ -51,7 +51,7 @@ Key invariants:
 
 | Situation | Raise / return | What the agent sees |
 |---|---|---|
-| Skill not found, unknown registry, path traversal, unsupported operation | `raise SkillNotFoundError(...)` etc. (ValueError subclass) | `is_error=True`; message readable; agent may retry |
+| Skill not found, unknown registry, path traversal, unsupported operation | `raise SkillNotFoundError(...)` etc. (ModelRecoverableError subclass) | `is_error=True`; message readable; agent may retry |
 | Registry unreachable, auth failure, rate limit | Caught at tool boundary; return error string | Plain `"Error: …"` or `{"error": "…"}` JSON; other registries unaffected |
 
 ## Code conventions

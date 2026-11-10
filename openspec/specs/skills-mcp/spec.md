@@ -15,7 +15,7 @@ multi-skill, ref-locked) and direct HTTP URLs.
 The server SHALL expose exactly five MCP tools — `list_skills`, `get_skill`,
 `get_registry_source`, `list_repo_entries` and `read_repo_text_file` —
 and one MCP resource template — `skill://{registry}/{+skill}{?file}` — over a
-stdio transport using FastMCP. Each tool SHALL carry an explicit `description=`
+stdio transport. Each tool SHALL carry an explicit `description=`
 parameter (not a docstring) as its only contract with the calling model.
 
 #### Scenario: Tool list is stable
@@ -351,8 +351,8 @@ a `SkillFileNotFoundError` (`ValueError`).
 The server SHALL distinguish two classes of error:
 **Model-recoverable errors** — conditions the calling agent can fix (unknown registry,
 skill not found, companion file not found, path traversal, unsupported operation) —
-SHALL be raised as `ValueError` subclasses so FastMCP marks the tool result
-`is_error=True`; the agent reads the message and may retry.
+SHALL reach the agent as an `is_error=True` tool result carrying the original,
+readable message; the agent may retry.
 **Infrastructure failures** — conditions the agent cannot fix (HTTP error, timeout,
 rate limit exhausted, auth env var unset) — SHALL be caught at the tool boundary
 and returned as a plain error string result; the server and other registries remain
@@ -396,10 +396,8 @@ a URL-encoded companion file path (e.g. `?file=references%2Fguide.md`).
 file's raw text.
 In both cases, resources return raw text (not JSON envelopes). The resource template SHALL
 be discoverable via `list_resource_templates`; `list_resources` SHALL remain empty.
-`RegistryUnavailableError` SHALL be caught at the resource boundary and re-raised as a
-`ValueError` so FastMCP surfaces it as an error content item rather than a protocol crash.
-All other `ValueError` subclasses (e.g. `SkillNotFoundError`, `PathTraversalError`) propagate
-naturally and are surfaced as error content items.
+Every failed read — model-recoverable or infrastructure — SHALL be returned to the client
+as an error response carrying a readable message, without crashing the server.
 
 #### Scenario: Reads SKILL.md via URI
 - **WHEN** `read_resource` is called with URI `skill://clark-skills/engineering/testing/tdd-development`
@@ -415,11 +413,15 @@ naturally and are surfaced as error content items.
 
 #### Scenario: Unknown registry produces error content item
 - **WHEN** `read_resource` is called with an unknown registry in the URI
-- **THEN** an error content item is returned and the server continues serving
+- **THEN** an error response naming the unknown registry is returned and the server continues serving
 
 #### Scenario: Registry infrastructure failure produces error content item
 - **WHEN** `read_resource` is called and the registry is temporarily unreachable
-- **THEN** `RegistryUnavailableError` is caught at the resource boundary, re-raised as `ValueError`, and an error content item is returned without crashing the server
+- **THEN** an error response is returned without crashing the server
+
+#### Scenario: Path traversal in resource URI is rejected
+- **WHEN** `read_resource` is called with a `file` query value containing a `..` path component
+- **THEN** an error response is returned and no upstream fetch is attempted
 
 ### Requirement: Configured Repository Source
 `get_registry_source(registry)` SHALL return only the configured GitHub source fields `registry`, `type`, `url`, `owner`, `repo`, `ref` and `skills_dir`, without upstream discovery or authentication data.

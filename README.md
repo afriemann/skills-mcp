@@ -217,7 +217,7 @@ Discover the template with `list_resource_templates`. `list_resources` returns e
 
 Each tool uses a consistent error format for its response type:
 
-- **Model-recoverable errors** (skill not found, unknown registry, unsupported operation, path traversal) — FastMCP marks the result `is_error=True`; the agent reads the message and may retry with corrected arguments.
+- **Model-recoverable errors** (skill not found, unknown registry, unsupported operation, path traversal) — the server re-raises them as the MCP SDK `ToolError`/`ResourceError`, so the result is `is_error=True`; the agent reads the message and may retry with corrected arguments.
 - **Infrastructure failures** (registry unreachable, auth failure, rate-limited) — caught at the tool boundary and returned as a per-tool error value (`{"error": "…"}` JSON for `list_skills` and repository tools; `{"error": "…"}` JSON or plain `"Error: …"` string for `get_skill` depending on whether `file` was provided). The server and other registries continue serving normally — one registry failure does not cascade.
 
 ## Caching
