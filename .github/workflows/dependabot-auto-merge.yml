@@ -5,17 +5,22 @@ on:
     workflows: ["CI"]
     types: [completed]
 
-# workflow_run runs in the base-branch (main) context, so GITHUB_TOKEN carries
-# write access to merge PRs regardless of whether the source is a fork or bot.
-permissions:
-  contents: write
-  pull-requests: write
+# workflow_run runs in the base-branch (main) context with a write-capable
+# GITHUB_TOKEN; the job-level actor and conclusion checks are the trust guards.
+permissions: {}
+
+concurrency:
+  group: dependabot-auto-merge-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
 
 jobs:
   auto-merge:
     name: Merge Dependabot PR
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
     # Guard: CI must have succeeded for a Dependabot-authored branch.
     # The if-check is at the job level so the job is entirely skipped (not just
     # the steps) for non-Dependabot or failed workflow runs.
@@ -28,6 +33,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           # Look up the open PR for the branch Dependabot ran CI on.
           PR_NUMBER=$(gh pr list \
@@ -59,13 +65,21 @@ jobs:
             exit 0
           fi
 
-          # For standard "Bump X from A.B.C to D.E.F" titles, skip when the
-          # leading (major) version component changes.
-          OLD_MAJOR=$(echo "$PR_TITLE" | grep -oP 'from \K\d+(?=\.)' | head -1)
-          NEW_MAJOR=$(echo "$PR_TITLE" | grep -oP ' to \K\d+(?=\.)' | head -1)
+          # Fail closed: merge only plain "Bump X from A.B[.C] to D.E" titles
+          # whose leading (major) version component is unchanged. Grouped
+          # updates and unparseable titles need manual review.
+          OLD_MAJOR=$(echo "$PR_TITLE" | sed -nE 's/.* from ([0-9]+)\.[0-9].* to [0-9]+\.[0-9].*/\1/p')
+          NEW_MAJOR=$(echo "$PR_TITLE" | sed -nE 's/.* from [0-9]+\.[0-9].* to ([0-9]+)\.[0-9].*/\1/p')
 
-          if [ -n "$OLD_MAJOR" ] && [ -n "$NEW_MAJOR" ] && [ "$OLD_MAJOR" != "$NEW_MAJOR" ]; then
-            echo "Major version bump ($OLD_MAJOR → $NEW_MAJOR) — skipping (manual review recommended)."
+          if [ -z "$OLD_MAJOR" ] || [ -z "$NEW_MAJOR" ] || [ "$OLD_MAJOR" != "$NEW_MAJOR" ]; then
+            echo "Major bump, grouped or unparseable title — skipping (manual review)."
+            exit 0
+          fi
+
+          # Only act on the exact commit CI validated.
+          PR_HEAD=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid')
+          if [ "$PR_HEAD" != "$HEAD_SHA" ]; then
+            echo "PR head $PR_HEAD differs from validated commit $HEAD_SHA — skipping."
             exit 0
           fi
 
@@ -78,4 +92,4 @@ jobs:
 
           # Squash-merge: the repo ruleset only permits squash merges.
           echo "Merging PR #$PR_NUMBER"
-          gh pr merge "$PR_NUMBER" --squash --repo "$REPO"
+          gh pr merge "$PR_NUMBER" --squash --match-head-commit "$HEAD_SHA" --repo "$REPO"
