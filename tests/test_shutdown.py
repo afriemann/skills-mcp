@@ -3,16 +3,41 @@
 # spec: openspec/specs/skills-mcp/spec.md
 
 import json
+import select
 import signal
 import socket
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 _EXIT_TIMEOUT_SECONDS = 10
-_STARTUP_SECONDS = 2
+_STARTUP_TIMEOUT_SECONDS = 15
 _SIGTERM_EXIT_SECONDS = 3
+
+
+_INITIALIZE_REQUEST = (
+    json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "shutdown-test", "version": "0"},
+            },
+        }
+    )
+    + "\n"
+)
+
+
+def _wait_until_serving(client_end: socket.socket, proc: subprocess.Popen[bytes]) -> None:
+    """Block until the server answers `initialize`, i.e. its SIGTERM handler is installed."""
+    client_end.sendall(_INITIALIZE_REQUEST.encode())
+    assert proc.stdout is not None
+    ready, _, _ = select.select([proc.stdout], [], [], _STARTUP_TIMEOUT_SECONDS)
+    assert ready, "server did not answer initialize"
 
 
 def test_server_exits_when_stdin_closes(tmp_path: Path):
@@ -64,12 +89,12 @@ def test_sigterm_exits_within_one_second_even_if_stdin_is_blocked(tmp_path: Path
     proc = subprocess.Popen(
         [sys.executable, "-m", "skills_mcp", "--config", str(config)],
         stdin=server_end.fileno(),
-        stdout=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
         stderr=stderr_log.open("wb"),
     )
     server_end.close()
     try:
-        time.sleep(_STARTUP_SECONDS)
+        _wait_until_serving(client_end, proc)
         proc.send_signal(signal.SIGTERM)
         assert proc.wait(timeout=_SIGTERM_EXIT_SECONDS) == 0, stderr_log.read_text()
     finally:
