@@ -103,7 +103,7 @@ _resource_errors = _surface_as(ResourceError)
 def build_app(config_path: Path | None = None) -> MCPServer:
     """Build and return the MCPServer application.
 
-    Loads config, wires adapters, and registers two tools and one resource template.
+    Loads config, wires adapters, and registers five tools and one resource template.
     Exits via sys.exit(1) on any config error (before the MCP handshake).
     """
     cfg = load_config(config_path)
@@ -177,7 +177,7 @@ def build_app(config_path: Path | None = None) -> MCPServer:
             "refresh_cache is ignored when 'file' is provided. "
             "\n\n"
             "URI-based access: skills and companion files are also readable via the "
-            "skill://{registry}/{skill}[?file=...] resource template "
+            "skill://{registry}/{+skill}{?file} resource template "
             "(discover it with list_resource_templates)."
         )
     )

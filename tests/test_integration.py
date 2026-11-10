@@ -492,6 +492,51 @@ async def test_read_resource_unknown_registry_error_content(mcp_app):
     assert "registry 'nonexistent' not found" in text
 
 
+async def test_read_resource_rejects_path_traversal_in_file(mcp_app):
+    """SDK-level path-safety rejects traversal in the file query param, before any upstream fetch."""
+    _text, is_error = await _read_resource(
+        mcp_app, "skill://gh-skills/coding?file=..%2F..%2Fetc%2Fpasswd"
+    )
+    assert is_error
+
+
+async def test_read_resource_registry_unavailable_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Scenario: Registry infrastructure failure produces error content item."""
+    p = tmp_path / "skills-mcp.jsonc"
+    p.write_text(
+        json.dumps(
+            {
+                "registries": {
+                    "broken": {
+                        "type": "http",
+                        "url": "https://unreachable.invalid/SKILL.md",
+                        "skill_name": "s",
+                    }
+                },
+                "cache": {"enabled": False},
+            }
+        )
+    )
+
+    class ErrorTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused")
+
+    original_cls = httpx.AsyncClient
+
+    class PatchedClient(original_cls):  # type: ignore[misc]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            kwargs["transport"] = ErrorTransport()
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", PatchedClient)
+    text, is_error = await _read_resource(build_app(p), "skill://broken/s")
+    assert is_error
+    assert "Registry unavailable" in text
+
+
 # ---------------------------------------------------------------------------
 # Scenario: Network error returns error string
 # ---------------------------------------------------------------------------

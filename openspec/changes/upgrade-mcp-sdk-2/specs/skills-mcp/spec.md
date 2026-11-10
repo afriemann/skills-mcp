@@ -73,3 +73,7 @@ as an error response carrying a readable message, without crashing the server.
 #### Scenario: Registry infrastructure failure produces error content item
 - **WHEN** `read_resource` is called and the registry is temporarily unreachable
 - **THEN** an error response is returned without crashing the server
+
+#### Scenario: Path traversal in resource URI is rejected
+- **WHEN** `read_resource` is called with a `file` query value containing a `..` path component
+- **THEN** an error response is returned and no upstream fetch is attempted
