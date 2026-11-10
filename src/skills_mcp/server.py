@@ -292,6 +292,8 @@ async def _run_with_graceful_shutdown(app: MCPServer) -> None:
 
             async def _serve() -> None:
                 await app.run_stdio_async()
+                # Client closed stdin: stop the SIGTERM waiter so the process exits.
+                tg.cancel_scope.cancel()
 
             async def _wait_for_term() -> None:
                 async for _sig in signals:

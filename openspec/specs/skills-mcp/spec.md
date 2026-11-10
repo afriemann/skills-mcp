@@ -375,7 +375,7 @@ The server entry point SHALL configure `logging` to write exclusively to `stderr
 (never `stdout`) before accepting any requests. The server SHALL support a `--config`
 argument and a `--log-level` argument. On `SIGTERM` the server SHALL cooperatively
 shut down via `anyio` and exit within 1 second even if stdin is blocked, using a
-`os._exit(0)` watchdog timer.
+`os._exit(0)` watchdog timer. The server SHALL also exit when the client closes stdin.
 
 #### Scenario: Logging goes to stderr only
 - **WHEN** the server is running and a request triggers a log message
@@ -384,6 +384,10 @@ shut down via `anyio` and exit within 1 second even if stdin is blocked, using a
 #### Scenario: SIGTERM triggers clean shutdown within 1 second
 - **WHEN** SIGTERM is sent to the running server
 - **THEN** the process exits within 1 second
+
+#### Scenario: Server exits when the client closes stdin
+- **WHEN** the client closes the server's stdin without sending SIGTERM
+- **THEN** the process exits with status 0
 
 ### Requirement: MCP Resource Surface
 The server SHALL expose a single MCP resource template `skill://{registry}/{+skill}{?file}`
