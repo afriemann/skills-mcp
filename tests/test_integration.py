@@ -1,4 +1,4 @@
-"""Integration tests using in-memory MCP transport (create_connected_server_and_client_session)."""
+"""Integration tests using the in-memory MCP client."""
 
 # spec: openspec/specs/skills-mcp/spec.md
 
@@ -8,8 +8,7 @@ from typing import Any
 
 import httpx
 import pytest
-from mcp.shared.memory import create_connected_server_and_client_session
-from pydantic import AnyUrl
+from mcp.client import Client
 
 from skills_mcp.server import build_app
 
@@ -162,7 +161,7 @@ def config_file_cached(tmp_path: Path) -> Path:
 
 @pytest.fixture()
 def mcp_app(config_file: Path, monkeypatch: pytest.MonkeyPatch):
-    """Build the FastMCP app with a fake httpx transport active for the entire test."""
+    """Build the MCP app with a fake httpx transport active for the entire test."""
     original_cls = httpx.AsyncClient
 
     class PatchedClient(original_cls):  # type: ignore[misc]
@@ -187,7 +186,7 @@ def mcp_app_cached(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ):
-    """Build the FastMCP app with caching enabled and a counting transport."""
+    """Build the MCP app with caching enabled and a counting transport."""
     original_cls = httpx.AsyncClient
 
     transport = counting_transport
@@ -213,29 +212,29 @@ def mcp_app_cached(
 
 
 async def _call(app, tool: str, args: dict[str, Any]) -> tuple[str, bool]:
-    async with create_connected_server_and_client_session(app, raise_exceptions=False) as session:
+    async with Client(app) as session:
         result = await session.call_tool(tool, args)
     text = ""
     for part in result.content:
         if hasattr(part, "text"):
             text = str(part.text)  # type: ignore[union-attr]
             break
-    return text, result.isError
+    return text, result.is_error
 
 
 async def _read_resource(app, uri: str) -> tuple[str, bool]:
     """Call read_resource and return (text, is_error)."""
-    async with create_connected_server_and_client_session(app, raise_exceptions=False) as session:
+    async with Client(app) as session:
         try:
-            result = await session.read_resource(AnyUrl(uri))
+            result = await session.read_resource(uri)
             text = ""
             for part in result.contents:
                 if hasattr(part, "text"):
                     text = str(part.text)  # type: ignore[union-attr]
                     break
             return text, False
-        except Exception:
-            return "", True
+        except Exception as exc:
+            return str(exc), True
 
 
 # ---------------------------------------------------------------------------
@@ -253,7 +252,7 @@ async def test_tool_list_is_stable(mcp_app):
         "list_repo_entries",
         "read_repo_text_file",
     }
-    async with create_connected_server_and_client_session(mcp_app) as session:
+    async with Client(mcp_app) as session:
         tools = await session.list_tools()
     names = {t.name for t in tools.tools}
     assert names == expected, f"Expected {expected}, got {names}"
@@ -338,9 +337,9 @@ async def test_rejects_http_repository_operations(mcp_app, tool):
 
 async def test_resource_template_is_advertised(mcp_app):
     """list_resource_templates MUST return exactly one template matching skill://{registry}/{+skill}{?file}."""
-    async with create_connected_server_and_client_session(mcp_app) as session:
+    async with Client(mcp_app) as session:
         result = await session.list_resource_templates()
-    uris = [t.uriTemplate for t in result.resourceTemplates]
+    uris = [t.uri_template for t in result.resource_templates]
     assert len(uris) == 1
     assert uris[0] == "skill://{registry}/{+skill}{?file}"
 
@@ -488,8 +487,9 @@ async def test_read_resource_companion_file(mcp_app):
 
 async def test_read_resource_unknown_registry_error_content(mcp_app):
     """Scenario: Unknown registry produces error content item (not crash)."""
-    _text, is_error = await _read_resource(mcp_app, "skill://nonexistent/some-skill")
+    text, is_error = await _read_resource(mcp_app, "skill://nonexistent/some-skill")
     assert is_error
+    assert "registry 'nonexistent' not found" in text
 
 
 # ---------------------------------------------------------------------------

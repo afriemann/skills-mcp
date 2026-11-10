@@ -2,30 +2,33 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
-import re
 import signal
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import ParamSpec, TypeVar
 from urllib.parse import unquote
 
 import anyio
 import httpx
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.resources.templates import ResourceTemplate
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ResourceError, ToolError
 
 from .auth import AuthResolver
 from .config import load_config
 from .config.model import Config
 from .dispatch import Dispatcher
-from .errors import RegistryUnavailableError
+from .errors import ModelRecoverableError, RegistryUnavailableError
 from .registries import SkillContent, build_adapters
 
 logger = logging.getLogger(__name__)
+
+P = ParamSpec("P")
+R = TypeVar("R")
 
 _DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=5.0)
 
@@ -72,37 +75,33 @@ def _build_list_skills_description(cfg: Config) -> str:
     return "".join(parts)
 
 
-class _SkillResourceTemplate(ResourceTemplate):
-    """ResourceTemplate subclass supporting slash-containing skill paths and ?file query params.
+def _surface_as(
+    error_type: type[Exception],
+) -> Callable[[Callable[P, Awaitable[R]]], Callable[P, Awaitable[R]]]:
+    """Re-raise model-recoverable errors as ``error_type`` so the SDK passes the message to the agent.
 
-    FastMCP 1.29.0's default ``matches`` uses ``[^/]+`` which rejects slashes.  This
-    subclass replaces the match logic to allow any characters (including ``/``) in the
-    ``skill`` capture group and extracts the optional ``file`` value from the query string.
+    The SDK withholds the text of any exception that is not its own tool/resource error type.
     """
 
-    def matches(self, uri: str) -> dict[str, Any] | None:
-        """Return extracted params if *uri* matches ``skill://{registry}/{skill}[?file=…]``."""
-        path, _, qs = uri.partition("?")
-        m = re.fullmatch(r"skill://(?P<registry>[^/]+)/(?P<skill>.+)", path)
-        if not m:
-            return None
-        d: dict[str, Any] = {
-            "registry": m.group("registry"),
-            "skill": m.group("skill"),
-        }
-        file_val: str | None = None
-        for part in qs.split("&") if qs else []:
-            if "=" in part:
-                k, v = part.split("=", 1)
-                if k == "file":
-                    file_val = v
-                    break
-        d["file"] = file_val
-        return d
+    def decorate(fn: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
+        @functools.wraps(fn)
+        async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+            try:
+                return await fn(*args, **kwargs)
+            except ModelRecoverableError as exc:
+                raise error_type(str(exc)) from exc
+
+        return wrapper
+
+    return decorate
 
 
-def build_app(config_path: Path | None = None) -> FastMCP:
-    """Build and return the FastMCP application.
+_tool_errors = _surface_as(ToolError)
+_resource_errors = _surface_as(ResourceError)
+
+
+def build_app(config_path: Path | None = None) -> MCPServer:
+    """Build and return the MCPServer application.
 
     Loads config, wires adapters, and registers two tools and one resource template.
     Exits via sys.exit(1) on any config error (before the MCP handshake).
@@ -114,7 +113,7 @@ def build_app(config_path: Path | None = None) -> FastMCP:
     _dispatcher: list[Dispatcher] = []
 
     @asynccontextmanager
-    async def lifespan(_app: FastMCP) -> AsyncIterator[None]:
+    async def lifespan(_app: MCPServer) -> AsyncIterator[None]:
         async with httpx.AsyncClient(
             timeout=_DEFAULT_TIMEOUT,
             follow_redirects=False,
@@ -126,7 +125,7 @@ def build_app(config_path: Path | None = None) -> FastMCP:
             finally:
                 _dispatcher.clear()
 
-    mcp: FastMCP = FastMCP(
+    mcp: MCPServer = MCPServer(
         "skills-mcp",
         lifespan=lifespan,
     )
@@ -141,6 +140,7 @@ def build_app(config_path: Path | None = None) -> FastMCP:
     # ------------------------------------------------------------------
 
     @mcp.tool(description=_build_list_skills_description(cfg))
+    @_tool_errors
     async def list_skills(registry: str, refresh_cache: bool = False) -> str:
         try:
             result = await _disp().list_skills_metadata(registry, refresh=refresh_cache)
@@ -181,6 +181,7 @@ def build_app(config_path: Path | None = None) -> FastMCP:
             "(discover it with list_resource_templates)."
         )
     )
+    @_tool_errors
     async def get_skill(
         registry: str, skill: str, file: str | None = None, refresh_cache: bool = False
     ) -> str:
@@ -209,6 +210,7 @@ def build_app(config_path: Path | None = None) -> FastMCP:
             "HTTP registries are unsupported; invalid input raises a tool error."
         )
     )
+    @_tool_errors
     async def get_registry_source(registry: str) -> str:
         try:
             return json.dumps(await _disp().get_registry_source(registry))
@@ -225,6 +227,7 @@ def build_app(config_path: Path | None = None) -> FastMCP:
             "Invalid input raises a tool error; infrastructure failures return an error JSON object."
         )
     )
+    @_tool_errors
     async def list_repo_entries(registry: str, path: str = "") -> str:
         try:
             return json.dumps(await _disp().list_repo_entries(registry, path))
@@ -241,37 +244,15 @@ def build_app(config_path: Path | None = None) -> FastMCP:
             "a tool error; infrastructure failures return an error JSON object."
         )
     )
+    @_tool_errors
     async def read_repo_text_file(registry: str, path: str) -> str:
         try:
             return json.dumps(await _disp().read_repo_text_file(registry, path))
         except RegistryUnavailableError as exc:
             return json.dumps({"error": f"Error: {exc}"})
 
-    # ------------------------------------------------------------------
-    # Resource template: skill://{registry}/{+skill}{?file}
-    #
-    # FastMCP 1.29.0's @mcp.resource decorator validates that URI template
-    # params exactly match function params using re.findall(r"{(\w+)}", uri),
-    # which misses {+skill} and {?file}.  We bypass the decorator entirely:
-    # create a _SkillResourceTemplate directly (no validation) and inject it
-    # into the resource manager's internal template dict.
-    # ------------------------------------------------------------------
-
-    async def _skill_resource_fn(registry: str, skill: str, file: str | None = None) -> str:
-        try:
-            if file is not None:
-                decoded_file = unquote(file)
-                raw = await _disp().get_skill(registry, skill, file=decoded_file)
-                return raw if isinstance(raw, str) else str(raw)
-            result = await _disp().get_skill(registry, skill)
-            assert isinstance(result, SkillContent)
-            return result.content  # raw SKILL.md text (not a JSON envelope)
-        except RegistryUnavailableError as exc:
-            raise ValueError(f"Registry unavailable: {exc}") from exc
-
-    skill_tmpl = _SkillResourceTemplate.from_function(
-        fn=_skill_resource_fn,
-        uri_template=_SKILL_URI_TEMPLATE,
+    @mcp.resource(
+        _SKILL_URI_TEMPLATE,
         name="skill-resource",
         description=(
             "Access a skill's SKILL.md or a companion file by URI. "
@@ -280,7 +261,17 @@ def build_app(config_path: Path | None = None) -> FastMCP:
             "Discover available skills with the list_skills tool."
         ),
     )
-    mcp._resource_manager._templates[skill_tmpl.uri_template] = skill_tmpl
+    @_resource_errors
+    async def skill_resource(registry: str, skill: str, file: str | None = None) -> str:
+        try:
+            if file is not None:
+                raw = await _disp().get_skill(registry, skill, file=file)
+                return raw if isinstance(raw, str) else str(raw)
+            result = await _disp().get_skill(registry, skill)
+            assert isinstance(result, SkillContent)
+            return result.content  # raw SKILL.md text (not a JSON envelope)
+        except RegistryUnavailableError as exc:
+            raise ResourceError(f"Registry unavailable: {exc}") from exc
 
     return mcp
 
@@ -290,7 +281,7 @@ def build_app(config_path: Path | None = None) -> FastMCP:
 # ---------------------------------------------------------------------------
 
 
-async def _run_with_graceful_shutdown(app: FastMCP) -> None:
+async def _run_with_graceful_shutdown(app: MCPServer) -> None:
     """Run the MCP server with a cooperative SIGTERM handler.
 
     On SIGTERM: signals the task group to cancel, then starts a 1-second
