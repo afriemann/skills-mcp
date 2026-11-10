@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import signal
+import threading
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -30,6 +31,7 @@ logger = logging.getLogger(__name__)
 P = ParamSpec("P")
 R = TypeVar("R")
 
+_SHUTDOWN_WATCHDOG_SECONDS = 1.0
 _DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=5.0)
 
 # URI template advertised to clients for skill resource access.
@@ -292,16 +294,18 @@ async def _run_with_graceful_shutdown(app: MCPServer) -> None:
 
             async def _serve() -> None:
                 await app.run_stdio_async()
+                # Client closed stdin: stop the SIGTERM waiter so the process exits.
+                tg.cancel_scope.cancel()
 
             async def _wait_for_term() -> None:
                 async for _sig in signals:
                     logger.info("SIGTERM received; shutting down")
 
-                    async def _watchdog() -> None:
-                        await anyio.sleep(1.0)
-                        os._exit(0)
-
-                    tg.start_soon(_watchdog)
+                    # A thread, not a task: the task group is cancelled right below and
+                    # would cancel the watchdog with it.
+                    watchdog = threading.Timer(_SHUTDOWN_WATCHDOG_SECONDS, os._exit, (0,))
+                    watchdog.daemon = True
+                    watchdog.start()
                     tg.cancel_scope.cancel()
                     break
 
